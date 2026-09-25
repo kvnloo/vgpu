@@ -114,11 +114,13 @@ describe("instance collections", () => {
   });
 
   test("rejects invalid schema names/formats and atomically validates add and set fields", () => {
-    for (const name of ["0", "12", "world0", "world1", "world2", "world3"]) {
+    for (const name of ["", " ", "0", "12", "1.5", "-2", "+3", "1e2", "0xff", "Infinity", "world0", "world1", "world2", "world3"]) {
       expect(caught(() => instances({ capacity: 1, attributes: { [name]: "float32" } })).code)
         .toBe("VGPU-INSTANCE-ATTRIBUTE");
     }
     expect(caught(() => instances({ capacity: 1, attributes: { bad: "float16" as "float32" } })).code)
+      .toBe("VGPU-INSTANCE-ATTRIBUTE");
+    expect(caught(() => instances({ capacity: 1, attributes: null as never })).code)
       .toBe("VGPU-INSTANCE-ATTRIBUTE");
 
     const collection = instances({ capacity: 2, attributes: { required: "float32", pair: "uint32x2" } });

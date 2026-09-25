@@ -90,7 +90,7 @@ class OwnedInstanceCollection implements InstanceCollection<InstanceAttributes> 
       );
     }
     this.capacity = options.capacity;
-    this.#attributes = normalizeAttributes(options.attributes ?? {});
+    this.#attributes = normalizeAttributes(options.attributes === undefined ? {} : options.attributes);
     this.#attributeByName = new Map(this.#attributes.map((attribute) => [attribute.name, attribute]));
     this.#stride = 64 + this.#attributes.reduce((bytes, attribute) => bytes + attribute.components * 4, 0);
     const byteLength = this.#stride * this.capacity;
@@ -456,7 +456,7 @@ function normalizeAttributes(attributes: InstanceAttributes): readonly Normalize
   const result: NormalizedAttribute[] = [];
   let offset = 64;
   for (const [name, declaration] of Object.entries(attributes)) {
-    if (/^\d+$/.test(name) || /^world[0-3]$/.test(name)) {
+    if (!Number.isNaN(Number(name)) || /^world[0-3]$/.test(name)) {
       throw instanceError(
         "VGPU-INSTANCE-ATTRIBUTE",
         `instances.attributes.${name}`,
