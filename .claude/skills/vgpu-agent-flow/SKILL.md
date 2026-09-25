@@ -16,6 +16,7 @@ talk to the human and never see this conversation — each prompt must carry the
 |---|---|---|
 | `repo:api-researcher` | fx `google/gemini-3.8-flash` → Codex `gpt-5.6-luna` | How other frameworks/libraries solve it. Raw findings only |
 | `repo:graphics-researcher` | fx `google/gemini-3.8-flash` → Codex `gpt-5.6-luna` | Papers, talks, shipped game techniques. Raw findings only |
+| `repo:eval-designer` | Claude `claude-opus-5.5` high → Codex `gpt-6-astra` high | Eval methodology, independent gates, negative controls, and evidence-based analysis |
 | `repo:api-designer` | Codex `gpt-6-astra` xhigh → Claude `claude-opus-5.5` xhigh | API alternatives + illustrative snippets, agent-ergonomics evaluation |
 | `repo:planner` | Codex `gpt-6-astra` high → Claude `claude-opus-5.5` high | Plan folder: index, task specs, lanes, progress log |
 | `repo:implementer` | Codex `gpt-5.6-sol` high → Claude `claude-opus-5.5` high | One task, test-first; runs `writer` and `reviewer` as children; commits |
@@ -168,7 +169,7 @@ For each lane that can start:
 - Follow up in the same session with `subharness send <session-id> --prompt "..."`; cancel with
   `subharness cancel <task-id>`. `subharness dashboard` shows live sessions.
 - Exit code 0 means a response arrived, not that the goal was met — read the response.
-- Version 0.0.4 also returns `approval_required` for supported native permission requests. Inspect
+- Version 0.0.5 returns `approval_required` for supported native permission requests. Inspect
   the actual operation, existing user authorization and returned schema; answer only an authorized,
   offered choice with `subharness respond <request-id> --content-file <path>`, then observe the same
   task. Do not replay the prompt or broaden permissions. Hard sandbox denials remain hard denials.
