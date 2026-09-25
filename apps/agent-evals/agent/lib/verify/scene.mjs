@@ -183,6 +183,9 @@ export async function verifySceneInSandbox(sandbox, { taskId, stage, turnId, met
       await sandbox.writeTextFile({ path: `${verificationDir}/run-config.json`, content: JSON.stringify(runConfig) });
       await runChecked(sandbox, { command: `node ${shellQuote(`${verificationDir}/runner.mjs`)} ${shellQuote(`${verificationDir}/run-config.json`)}` }, "submitted source runner");
       execution = await readSandboxJson(sandbox, runConfig.resultPath);
+      if (!execution || !Object.hasOwn(execution, "exitCode")) {
+        throw new Error("submitted source runner execution record is missing or invalid");
+      }
       if (execution?.exitCode !== 0 || execution?.timedOut) {
         classification = "application-failure";
         reason = execution?.timedOut ? `submitted source exceeded ${timeoutMs}ms` : `submitted source exited ${execution?.exitCode ?? "unknown"}`;

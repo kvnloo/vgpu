@@ -289,6 +289,27 @@ test("sandbox transport classifies setup, manifest, and evidence export command 
   }
 });
 
+test("a missing runner execution record is infrastructure failure, not an agent failure", async () => {
+  const files = new Map();
+  const sandbox = fakeSceneSandbox(files, () => null);
+  const read = sandbox.readTextFile;
+  sandbox.readTextFile = (options) => options.path.endsWith("/execution.json")
+    ? Promise.resolve(null)
+    : read(options);
+  const contract = sceneContract("scene-robot-arm", 1);
+  const result = await verifySceneInSandbox(sandbox, {
+    taskId: contract.taskId,
+    stage: 1,
+    turnId: "turn-missing-execution",
+    metaId: "event-missing-execution",
+    input: contract.input,
+    timeoutMs: 50,
+  });
+  assert.equal(result.classification, "infrastructure-error");
+  assert.match(result.reason, /execution record/i);
+  assert.equal(result.cleanupOk, true);
+});
+
 test("sandbox transport reports a nonzero cleanup command without claiming removal", async () => {
   const files = new Map();
   const sandbox = fakeSceneSandbox(files, (command) => command.startsWith("rm -rf ")
