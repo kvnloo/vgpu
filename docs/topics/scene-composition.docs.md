@@ -75,6 +75,21 @@ Every connection is visible in the code: the collection feeds the bridge, the br
 
 ## Architecture
 
+### Scope and external math
+
+Scene utilities own hierarchy composition, instance records, camera behavior, mesh recipes, and
+their rendering integration. Use a dedicated CPU math library such as `math` for general vector
+and quaternion operations, decomposition, interpolation, spatial queries, springs, and noise.
+The existing scene transform conveniences remain supported; they are not a growing general math
+API. Shader-side WGSL utilities remain separate from this CPU boundary.
+
+External matrices enter through `setWorld`, bound world sources, or packed `setWorlds` batches.
+There is no required math-library class or runtime dependency. See
+[Using math with scene data](scene-math.docs.md) for checked examples, typed-array boundaries,
+camera conventions, and copy/publication timing.
+
+### Data flow
+
 The common flow is **local transforms → world matrices → instance records → GPU instance stream → your draw**. Each stage is a separate function call you make, in an order you choose. A system that already has final world matrices — a physics engine, for example — enters directly at the instance records and skips the earlier stages.
 
 ```text

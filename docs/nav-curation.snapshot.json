@@ -110,6 +110,7 @@
       {
         "title": "Integrations",
         "slugs": [
+          "scene-math",
           "threejs",
           "nextjs",
           "no-bundler",

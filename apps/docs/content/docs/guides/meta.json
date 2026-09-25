@@ -6,6 +6,7 @@
     "scene-composition",
     "scene-migration",
     "---Integrations---",
+    "scene-math",
     "threejs",
     "nextjs",
     "no-bundler",
