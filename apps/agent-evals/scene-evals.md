@@ -29,7 +29,15 @@ The construction prompt names `contract.md`, the `node render.mjs` entry point, 
 ``Use `npx vgpu`.``. Robot and warehouse prompts and seeds name no scene function, import path,
 documentation command, GPU plumbing, or strategy. The shader task deliberately supplies its WGSL
 interface and requires the file unchanged: that is an integration condition, not a discovery
-result. Follow-up details live only in the stage-2 prompt strings in `scene-contracts.mjs`.
+result. Stage-2 prompts live in `scene-contracts.mjs`. Warehouse operation semantics are
+introduced there; the robot pose fields and shader camera convention are already in the
+construction contracts.
+
+A second-turn pass establishes correctness on that batch, not necessarily adaptation to a new
+requirement. Run the preserved first-turn source against the second-turn inputs before making
+an adaptation claim. The [pilot findings](scene-evals-findings.md) record these controls. A future
+revision that measures adaptation should reserve a capability absent from the construction
+contract and test that the first-turn implementation actually lacks it.
 
 ## Running it
 

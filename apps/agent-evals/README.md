@@ -340,7 +340,10 @@ be guessed from what a demo usually looks like.
 ### scene-robot-arm, scene-shader-bindings and scene-warehouse
 
 Each of these tasks runs two turns: the agent first builds a headless `node render.mjs <input>
-<output>` renderer, then adds a follow-up feature. After each turn the hook archives the workspace
+<output>` renderer, then responds to a follow-up prompt and a larger input batch. A second-turn
+pass does not by itself demonstrate a new capability: the robot and shader contracts already
+define the relevant pose and camera fields. See [pilot findings](scene-evals-findings.md) for
+first-turn-source controls against the second batch. After each turn the hook archives the workspace
 before verification writes anything, copies the source outside `/workspace`, and reruns it on a
 batch the host chose, with a 60-second limit. The host then grades the exported `result.json` and
 PNGs against independent scalar math. Hard gates cover protocol, artifacts, numeric state and
