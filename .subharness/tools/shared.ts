@@ -40,6 +40,10 @@ The caller supplies <topic>. Create missing directories inside your allowed area
 /** Delegation etiquette for agents that declare children. */
 export const delegationInstructions = `
 When delegation is authorized, use the exact provided private launcher with run subagent:<name> for declared children; when no launcher is provided, use \`subharness run subagent:<name>\`. Children receive no transcript and no loaded skills: every handoff must restate the topic directory, the task file path, decisions.md, the files in scope, and the checks to run. Prefer one ordinary run through native background-command controls when you have independent work, then collect its result; otherwise launch once with --detach, keep the task and session ids, continue working, and collect with \`subharness wait <task-id>\`. Detached admission is not completion; verify the terminal outcome. Never use shell & and never retry an unchanged permission failure.
+
+Keep the host background-command identifier as well as Subharness task/session identifiers. Collect the attached command's complete result and check its task state; an early response or an exit code of 0 is not necessarily completion. If work remains pending, observe subsequent responses with \`wait <task-id> --after <response-id>\`. External chat reactivation depends on the host; --detach alone does not configure a completion notification. Do not stop coordinating an authorized implementation merely because its workers were launched.
+
+Subharness 0.0.4 can return \`approval_required\` with request-specific schemas. Inspect the requested action and existing authorization before answering an offered choice using \`respond <request-id> --content-file <path>\`, then observe the same task without replaying it. Never approve your own request, broaden native policy, or treat a hard sandbox denial as an approval request. Unsupported interactive input can still fail with INPUT_REQUIRED. Claude steering may be delivered as interruption and cancel descendants; prefer queued follow-ups when interruption is unnecessary.
 `.trim();
 
 /** Rules shared by both research specialists. */

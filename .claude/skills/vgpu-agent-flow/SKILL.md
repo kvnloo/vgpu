@@ -160,9 +160,20 @@ For each lane that can start:
 - Prefer one ordinary `subharness run ...` per specialist through your background-command
   controls, continue other work, and collect the result. Otherwise use `--detach` and later
   `subharness wait <task-id>`. Never use shell `&`.
+- Record the host background-command identifier alongside each task/session identifier. Collect
+  that command's result and inspect its state; an early response can leave descendant work pending.
+  Use `wait <task-id> --after <response-id>` to observe later responses. `--detach` does not configure
+  a completion notification or guarantee external chat reactivation; that depends on the host.
+  Continue coordinating the authorized implementation after each result rather than ending at launch.
 - Follow up in the same session with `subharness send <session-id> --prompt "..."`; cancel with
   `subharness cancel <task-id>`. `subharness dashboard` shows live sessions.
 - Exit code 0 means a response arrived, not that the goal was met — read the response.
+- Version 0.0.4 also returns `approval_required` for supported native permission requests. Inspect
+  the actual operation, existing user authorization and returned schema; answer only an authorized,
+  offered choice with `subharness respond <request-id> --content-file <path>`, then observe the same
+  task. Do not replay the prompt or broaden permissions. Hard sandbox denials remain hard denials.
+- In the dashboard, Up/Down selects a run, Enter opens session requests and expands prompt/response
+  details, and Escape returns. Ctrl+C closes the monitor without stopping agents.
 - Check readiness without spending a model turn: `npx subharness check repo:<name>`.
 
 ## Personal access (per user, not committed)
