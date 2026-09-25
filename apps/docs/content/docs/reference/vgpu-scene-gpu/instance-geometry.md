@@ -1,6 +1,6 @@
 ---
-title: Instance geometry
-summary: Publish fixed-capacity instance collections as vertex streams for application-owned geometry and shaders.
+title: "Instance geometry"
+description: "Publish fixed-capacity instance collections as vertex streams for application-owned geometry and shaders."
 ---
 
 # instanceGeometry

@@ -1,6 +1,6 @@
 ---
-title: Camera state
-summary: Compose orbit, pan, dolly, zoom, smoothing, and projection with application-owned camera state.
+title: "Camera state"
+description: "Compose orbit, pan, dolly, zoom, smoothing, and projection with application-owned camera state."
 ---
 
 # orbitRig

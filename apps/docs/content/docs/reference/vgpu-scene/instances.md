@@ -1,6 +1,7 @@
-# instances
-
-Creates a fixed-capacity collection of instance records: one world matrix plus your typed per-instance attributes, packed for upload. Use it for large populations of the same mesh (trees, particles, crowd agents, debris) where one `SceneNode` per object is unnecessary.
+---
+title: "instances"
+description: "Creates a fixed-capacity collection of instance records: one world matrix plus your typed per-instance attributes, packed for upload. Use it for large populations of the same mesh (trees, particles, crowd agents, debris) where one `SceneNode` per object is unnecessary."
+---
 
 ## Import
 

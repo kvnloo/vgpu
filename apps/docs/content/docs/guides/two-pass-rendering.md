@@ -14,12 +14,12 @@ Surfaces and canvases have no depth buffer, and [Draws](concepts-draws.docs.md) 
 
 ```ts
 import { draw, effect, frame, geometry, init, sampler, surface, target } from "vgpu";
-import { box, orbit, perspectiveCamera, sphere } from "vgpu/scene";
+import { box, composeMatrix, orbitRig, perspective, rigPose, sphere, viewMatrices } from "vgpu/scene";
 
 const gpu = await init();
 const canvas = document.querySelector("canvas")!;
 
-// Both objects share one shader; `model.color` tells them apart.
+// Both objects share shading; vertex entrypoints match their different attribute layouts.
 const objectShader = `
   struct Camera { viewProjection: mat4x4f }
   struct Model { model: mat4x4f, color: vec3f }
@@ -28,11 +28,19 @@ const objectShader = `
 
   struct VertexOut { @builtin(position) position: vec4f, @location(0) normal: vec3f }
 
-  @vertex fn vs_main(@location(0) position: vec3f, @location(1) normal: vec3f) -> VertexOut {
+  fn vertex(position: vec3f, normal: vec3f) -> VertexOut {
     var out: VertexOut;
     out.position = camera.viewProjection * model.model * vec4f(position, 1.0);
     out.normal = (model.model * vec4f(normal, 0.0)).xyz;
     return out;
+  }
+
+  @vertex fn vs_box(@location(0) position: vec3f, @location(1) normal: vec3f) -> VertexOut {
+    return vertex(position, normal);
+  }
+
+  @vertex fn vs_sphere(@location(0) position: vec3f, @location(1) normal: vec3f, @location(2) uv: vec2f) -> VertexOut {
+    return vertex(position, normal);
   }
 
   @fragment fn fs_main(@location(0) normal: vec3f) -> @location(0) vec4f {
@@ -60,18 +68,32 @@ const scene = target(gpu, { size: [width, height], depth: true });
 // Pass 2 target: the canvas the user actually sees.
 const canvasSurface = surface(gpu, canvas);
 
-const camera = perspectiveCamera({ fov: 45, aspect: width / height, position: [2.5, 2, 3.5], target: [0, 0, 0] });
+const rig = orbitRig({ yaw: 0.62, pitch: 0.44, distance: 4.74 });
+const pose = { position: new Float32Array(3), quaternion: new Float32Array(4) };
+const projection = perspective({ fov: 45, near: 0.1, far: 100 }, width / height, new Float32Array(16));
+const camera = { view: new Float32Array(16), viewProjection: new Float32Array(16) };
+viewMatrices(rigPose(rig, pose), projection, camera);
+const cubeWorld = composeMatrix({ position: [1, 0, 0] }, new Float32Array(16));
+const ballWorld = composeMatrix({
+  position: [Math.cos(2.1), 0, Math.sin(2.1)], rotation: [0, 2.1, 0],
+}, new Float32Array(16));
 
-const cube = draw(gpu, { shader: objectShader, geometry: geometry(gpu, box({ size: 1 })), cull: "back" });
+const cube = draw(gpu, {
+  shader: objectShader, entry: { vertex: "vs_box" },
+  geometry: geometry(gpu, box({ size: 1 })), cull: "back",
+});
 cube.set({
   camera: { viewProjection: camera.viewProjection },
-  model: { model: orbit(0), color: [0.95, 0.45, 0.2] },
+  model: { model: cubeWorld, color: [0.95, 0.45, 0.2] },
 });
 
-const ball = draw(gpu, { shader: objectShader, geometry: geometry(gpu, sphere({ radius: 0.6 })), cull: "back" });
+const ball = draw(gpu, {
+  shader: objectShader, entry: { vertex: "vs_sphere" },
+  geometry: geometry(gpu, sphere({ radius: 0.6 })), cull: "back",
+});
 ball.set({
   camera: { viewProjection: camera.viewProjection },
-  model: { model: orbit(2.1), color: [0.3, 0.6, 1] },
+  model: { model: ballWorld, color: [0.3, 0.6, 1] },
 });
 
 // The present pass is a single full-screen effect bound to the offscreen target.
@@ -96,13 +118,17 @@ Three things are doing the work:
 
 Animating? Move the `frame(gpu, ...)` body into [`frameLoop(gpu, ...)`](concepts-frames.docs.md) and re-`set()` the model matrices from `clock(gpu).time` each tick. The targets, draws, and the present effect are all created once, outside the loop.
 
+Camera and model matrices are ordinary application-owned arrays. Update them before the frame and call `set()` on each draw that needs the new values; mutation alone does not refresh a uniform. The shader owns both binding declarations. The normal calculation above assumes rotation and uniform scale; for nonuniform scale or shear, use `transformNormal` from `@vgpu/wgsl-std/scene` with the complete world matrix. [Scene composition](scene-composition.docs.md) covers that helper and external camera state.
+
+The box supplies `position` and `normal`; the sphere also supplies `uv`. Their vertex entrypoints declare these complete layouts, even though this shader does not use UVs for shading.
+
 ## Headless / no-bundler variant
 
 Rendering this from Node, a script, or a test instead of a browser? Everything is identical except that the second target is another offscreen target rather than a canvas surface, and you read the pixels back at the end:
 
 ```ts
 import { draw, effect, frame, geometry, init, sampler, target } from "vgpu/node";
-import { box, orbit, perspectiveCamera } from "vgpu/scene";
+import { box, composeMatrix, orbitRig, perspective, rigPose, viewMatrices } from "vgpu/scene";
 
 const objectShader = "/* the same vertex + fragment shader as above */";
 const presentShader = "/* the same present shader as above */";
@@ -114,11 +140,19 @@ const gpu = await init();
 const scene = target(gpu, { size: [width, height], depth: true });
 const output = target(gpu, { size: [width, height] });   // stands in for the canvas surface
 
-const camera = perspectiveCamera({ fov: 45, aspect: width / height, position: [2.5, 2, 3.5], target: [0, 0, 0] });
-const cube = draw(gpu, { shader: objectShader, geometry: geometry(gpu, box({ size: 1 })), cull: "back" });
+const rig = orbitRig({ yaw: 0.62, pitch: 0.44, distance: 4.74 });
+const pose = { position: new Float32Array(3), quaternion: new Float32Array(4) };
+const projection = perspective({ fov: 45, near: 0.1, far: 100 }, width / height, new Float32Array(16));
+const camera = { view: new Float32Array(16), viewProjection: new Float32Array(16) };
+viewMatrices(rigPose(rig, pose), projection, camera);
+const cubeWorld = composeMatrix({ position: [1, 0, 0] }, new Float32Array(16));
+const cube = draw(gpu, {
+  shader: objectShader, entry: { vertex: "vs_box" },
+  geometry: geometry(gpu, box({ size: 1 })), cull: "back",
+});
 cube.set({
   camera: { viewProjection: camera.viewProjection },
-  model: { model: orbit(0), color: [0.95, 0.45, 0.2] },
+  model: { model: cubeWorld, color: [0.95, 0.45, 0.2] },
 });
 const present = effect(gpu, presentShader, {
   set: { scene, sceneSampler: sampler(gpu, { minFilter: "linear", magFilter: "linear" }) },

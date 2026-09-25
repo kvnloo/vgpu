@@ -1,6 +1,7 @@
-# @vgpu/wgsl-std/scene
-
-Pure WGSL transform helpers for instanced and scene-composed vertex shaders. Import them when a vertex shader receives a world matrix — as four per-instance columns from [`instanceGeometry()`](/reference/vgpu-scene-gpu/instance-geometry) or from your own data — and needs world-space positions, directions, and normals without declaring any resources.
+---
+title: "@vgpu/wgsl-std/scene"
+description: "Pure WGSL transform helpers for instanced and scene-composed vertex shaders. Import them when a vertex shader receives a world matrix — as four per-instance columns from [`instanceGeometry()`](/reference/vgpu-scene-gpu/instance-geometry) or from your own data — and needs world-space positions, directions, and normals without declaring any resources."
+---
 
 ## Import
 

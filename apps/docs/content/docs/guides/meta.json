@@ -3,6 +3,8 @@
   "pages": [
     "---General---",
     "getting-started",
+    "scene-composition",
+    "scene-migration",
     "---Integrations---",
     "threejs",
     "nextjs",

@@ -1,6 +1,6 @@
 ---
-title: External hierarchy
-summary: Evaluate parent-child transforms stored in application-owned arrays.
+title: "External hierarchy"
+description: "Evaluate parent-child transforms stored in application-owned arrays."
 ---
 
 # hierarchyOrder
