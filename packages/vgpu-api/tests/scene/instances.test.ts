@@ -113,6 +113,79 @@ describe("instance collections", () => {
     for (const invalid of invalidCases) expect(caught(invalid).code).toBe("VGPU-INSTANCE-VALUE");
   });
 
+  test("packs omitted defaults and explicit overrides for every scalar format", () => {
+    const collection = instances({
+      capacity: 2,
+      attributes: {
+        heat: { format: "float32", default: 0.25 },
+        signedCode: { format: "sint32", default: -7 },
+        kind: { format: "uint32", default: 9 },
+      },
+    });
+    const defaulted = collection.add();
+    const overridden = collection.add({ heat: 1.5, signedCode: -2, kind: 0xffffffff });
+    const protocol = getInstanceProtocol(collection);
+    const view = new DataView(protocol.records.buffer, protocol.records.byteOffset, protocol.records.byteLength);
+
+    const defaultedOffset = collection.slotOf(defaulted) * protocol.layout.stride;
+    expect(view.getFloat32(defaultedOffset + 64, true)).toBe(0.25);
+    expect(view.getInt32(defaultedOffset + 68, true)).toBe(-7);
+    expect(view.getUint32(defaultedOffset + 72, true)).toBe(9);
+
+    const overriddenOffset = collection.slotOf(overridden) * protocol.layout.stride;
+    expect(view.getFloat32(overriddenOffset + 64, true)).toBe(1.5);
+    expect(view.getInt32(overriddenOffset + 68, true)).toBe(-2);
+    expect(view.getUint32(overriddenOffset + 72, true)).toBe(0xffffffff);
+  });
+
+  test("preserves scalar and vector default snapshots and packing in mixed schemas", () => {
+    const tintDefault = [0.1, 0.2, 0.3];
+    const tileDefault = new Uint32Array([4, 5]);
+    const collection = instances({
+      capacity: 2,
+      attributes: {
+        heat: { format: "float32", default: 0.5 },
+        tint: { format: "float32x3", default: tintDefault },
+        layer: { format: "sint32", default: -3 },
+        tile: { format: "uint32x2", default: tileDefault },
+      },
+    });
+    tintDefault[0] = 99;
+    tileDefault[0] = 99;
+
+    const defaulted = collection.add();
+    const overridden = collection.add({
+      heat: 1.25,
+      tint: [0.4, 0.5, 0.6],
+      layer: 7,
+      tile: [8, 9],
+    });
+    const protocol = getInstanceProtocol(collection);
+    const view = new DataView(protocol.records.buffer, protocol.records.byteOffset, protocol.records.byteLength);
+
+    const defaultedOffset = collection.slotOf(defaulted) * protocol.layout.stride;
+    expect(floats(protocol.records, defaultedOffset + 64, 4)).toEqual([
+      0.5,
+      Math.fround(0.1),
+      Math.fround(0.2),
+      Math.fround(0.3),
+    ]);
+    expect(view.getInt32(defaultedOffset + 80, true)).toBe(-3);
+    expect(view.getUint32(defaultedOffset + 84, true)).toBe(4);
+    expect(view.getUint32(defaultedOffset + 88, true)).toBe(5);
+
+    const overriddenOffset = collection.slotOf(overridden) * protocol.layout.stride;
+    expect(floats(protocol.records, overriddenOffset + 64, 4)).toEqual([
+      1.25,
+      Math.fround(0.4),
+      0.5,
+      Math.fround(0.6),
+    ]);
+    expect(view.getInt32(overriddenOffset + 80, true)).toBe(7);
+    expect(view.getUint32(overriddenOffset + 84, true)).toBe(8);
+    expect(view.getUint32(overriddenOffset + 88, true)).toBe(9);
+  });
+
   test("rejects invalid schema names/formats and atomically validates add and set fields", () => {
     for (const name of ["", " ", "0", "12", "1.5", "-2", "+3", "1e2", "0xff", "Infinity", "world0", "world1", "world2", "world3"]) {
       expect(caught(() => instances({ capacity: 1, attributes: { [name]: "float32" } })).code)

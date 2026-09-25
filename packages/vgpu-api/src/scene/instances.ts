@@ -379,9 +379,12 @@ class OwnedInstanceCollection implements InstanceCollection<InstanceAttributes> 
     for (const attribute of this.#attributes) {
       const supplied = Object.prototype.hasOwnProperty.call(input, attribute.name);
       if (!initial && !supplied) continue;
-      let value = supplied ? input[attribute.name] : attribute.defaultValue;
-      if (initial && value === undefined && attribute.defaultValue !== undefined) {
-        value = attribute.defaultValue;
+      const defaultValue = attribute.components === 1
+        ? attribute.defaultValue?.[0]
+        : attribute.defaultValue;
+      let value = supplied ? input[attribute.name] : defaultValue;
+      if (initial && value === undefined && defaultValue !== undefined) {
+        value = defaultValue;
       }
       if (value === undefined) {
         if (!initial) {
