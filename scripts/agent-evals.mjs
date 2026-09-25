@@ -20,6 +20,14 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
+import {
+  consumeSceneLauncherArgs,
+  isSceneTask,
+  resolveSceneTarballsDir,
+  validatePackedArtifacts,
+  validateSceneAuth,
+} from "../apps/agent-evals/agent/lib/scene-auth.mjs";
+import { sourceKey } from "../apps/agent-evals/scripts/pack-vgpu.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_DIR = join(REPO_ROOT, "apps", "agent-evals");
@@ -86,14 +94,14 @@ function usage(problem) {
   process.exit(EXIT_ENVIRONMENT);
 }
 
-const argv = process.argv.slice(2);
-const flagIndex = argv.indexOf("--task");
-const taskId = flagIndex === -1 ? undefined : argv[flagIndex + 1];
-// Everything except the flag and its value is passed through to `eve eval`.
-const forwarded = flagIndex === -1 ? argv : [...argv.slice(0, flagIndex), ...argv.slice(flagIndex + 2)];
+const { taskId, skipPack, forwarded } = consumeSceneLauncherArgs(process.argv.slice(2));
 
 if (!taskId) usage("--task <id> is required.");
 if (!knownTasks().includes(taskId)) usage(`unknown task "${taskId}".`);
+if (skipPack && !isSceneTask(taskId)) usage("--skip-pack is available only for scene evals.");
+if (isSceneTask(taskId) && !skipPack) {
+  usage("scene evals require a Node 22 pack followed by this Node 24 launcher with --skip-pack.");
+}
 const evalFile = join("evals", `${taskId}.eval.ts`);
 if (!existsSync(join(PACKAGE_DIR, evalFile))) usage(`task "${taskId}" has a seed directory but no ${evalFile}.`);
 
@@ -101,6 +109,14 @@ process.env.VGPU_EVALS_TASK = taskId;
 // Absolute, because bootstrap reads the seed files from the runtime process,
 // where a path derived from a module URL lands inside eve's dev-runtime snapshot.
 process.env.VGPU_EVALS_TASKS_DIR ??= TASKS_DIR;
+
+// Scene runs are project-OIDC only. This check happens before provider
+// preflight, packing, or Eve spawn and never logs credential contents.
+const sceneAuth = validateSceneAuth(taskId, process.env);
+if (!sceneAuth.ok) {
+  process.stderr.write(`pnpm agent-evals: ${sceneAuth.reason}.\nNothing was packed, fetched, or started.\n`);
+  process.exit(EXIT_ENVIRONMENT);
+}
 
 // Preflight the provider when a model was named explicitly.
 //
@@ -114,7 +130,9 @@ process.env.VGPU_EVALS_TASKS_DIR ??= TASKS_DIR;
 // constant that lives in agent/agent.ts.
 const requestedModel = process.env.VGPU_EVALS_MODEL;
 if (requestedModel) {
-  const credential = process.env.AI_GATEWAY_API_KEY || process.env.VERCEL_OIDC_TOKEN;
+  const credential = isSceneTask(taskId)
+    ? process.env.VERCEL_OIDC_TOKEN
+    : process.env.AI_GATEWAY_API_KEY || process.env.VERCEL_OIDC_TOKEN;
   if (credential) {
     const provider = requestedModel.split("/")[0];
     let response;
@@ -156,7 +174,9 @@ if (requestedModel) {
           ? "  An account owner has to allow the provider in the AI Gateway settings."
           : missing
             ? "  Check the slug against the gateway's model list."
-            : "  Check AI_GATEWAY_API_KEY / VERCEL_OIDC_TOKEN (expired?). An OIDC token\n  lasts 12 hours; re-run `vercel env pull` to refresh it.";
+            : isSceneTask(taskId)
+              ? "  Start a fresh configured project session; credentials are not refreshed inside a running specialist session."
+              : "  Check AI_GATEWAY_API_KEY / VERCEL_OIDC_TOKEN (expired?). An OIDC token\n  lasts 12 hours; re-run `vercel env pull` to refresh it.";
         process.stderr.write(
           [headline, "", advice, "  Nothing was packed and no sandbox was started.", ""].join("\n"),
         );
@@ -169,14 +189,28 @@ if (requestedModel) {
   }
 }
 
-process.stdout.write("pnpm agent-evals: packing this branch's vgpu…\n");
-const pack = spawnSync(process.execPath, [join(PACKAGE_DIR, "scripts", "pack-vgpu.mjs")], {
-  cwd: PACKAGE_DIR,
-  stdio: "inherit",
-});
-if (pack.status !== 0) {
-  process.stderr.write("pnpm agent-evals: packing failed; not running the evals.\n");
-  process.exit(pack.status ?? 1);
+const workDir = join(PACKAGE_DIR, ".work");
+const resolvedTarballsDir = resolveSceneTarballsDir(PACKAGE_DIR, process.env);
+const manifestPath = join(resolvedTarballsDir, "tarballs.json");
+if (skipPack) {
+  const current = sourceKey();
+  const packed = validatePackedArtifacts(manifestPath, current);
+  if (!packed.ok) {
+    process.stderr.write(`pnpm agent-evals: --skip-pack rejected: ${packed.reason}.\n`);
+    process.stderr.write("Pack with Node 22 first; no eval was started.\n");
+    process.exit(EXIT_ENVIRONMENT);
+  }
+  process.stdout.write(`pnpm agent-evals: using checked branch tarballs (source key ${current}).\n`);
+} else {
+  process.stdout.write("pnpm agent-evals: packing this branch's vgpu…\n");
+  const pack = spawnSync(process.execPath, [join(PACKAGE_DIR, "scripts", "pack-vgpu.mjs")], {
+    cwd: PACKAGE_DIR,
+    stdio: "inherit",
+  });
+  if (pack.status !== 0) {
+    process.stderr.write("pnpm agent-evals: packing failed; not running the evals.\n");
+    process.exit(pack.status ?? 1);
+  }
 }
 
 // Hand the runtime ABSOLUTE paths.
@@ -188,9 +222,8 @@ if (pack.status !== 0) {
 // because it is gitignored and never copied. The first real run died exactly
 // there. These variables are the contract that keeps the packer (this process),
 // the runtime (snapshot) and the eval (CLI process) pointing at one directory.
-const workDir = join(PACKAGE_DIR, ".work");
 process.env.VGPU_EVALS_WORK_DIR ??= workDir;
-process.env.VGPU_EVALS_TARBALLS_DIR ??= join(workDir, "tarballs");
+process.env.VGPU_EVALS_TARBALLS_DIR ??= resolvedTarballsDir;
 process.env.VGPU_EVALS_REPO_ROOT ??= REPO_ROOT;
 
 // Hash of THIS TASK's seed tree, so the sandbox template is rebuilt when its
@@ -215,7 +248,6 @@ process.env.VGPU_EVALS_TASK_SEED_KEY ??= seedHash.digest("hex").slice(0, 16);
 // cannot recompute it: `git` resolves against the snapshot's cwd, where the
 // `packages/` pathspec matches nothing, so it would produce a different key and
 // report the freshly built tarballs as stale.
-const manifestPath = join(workDir, "tarballs", "tarballs.json");
 try {
   process.env.VGPU_EVALS_SOURCE_KEY ??= JSON.parse(readFileSync(manifestPath, "utf8")).sourceKey;
 } catch (error) {
