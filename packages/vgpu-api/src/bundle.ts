@@ -1,5 +1,5 @@
 import { createRenderBundle } from "./core/render-bundle.ts";
-import { InternalDraw, drawUsesBlendConstant, drawUsesStencilReference, encodeDraw, registerDrawBundle, watchDrawResources, type BundleBackReference, type BundleStaleEvent, type Draw, type DrawCallOptions } from "./draw.ts";
+import { assertDrawGeometryUsable, InternalDraw, drawUsesBlendConstant, drawUsesStencilReference, encodeDraw, registerDrawBundle, watchDrawResources, type BundleBackReference, type BundleStaleEvent, type Draw, type DrawCallOptions } from "./draw.ts";
 import { InternalEffect, effectDraw, type Effect } from "./effect.ts";
 import type { CompileTarget, Target, TargetSignature } from "./target.ts";
 import { normalizeSignature, signatureKeyOf, validateTargetSignature } from "./pipeline-store.ts";
@@ -95,6 +95,7 @@ class RecordedBundle implements Bundle, BundleBackReference {
     const actualKey = signatureKeyOf(actual);
     if (this.#signatureKey !== actualKey) throw bundleStaleError(this.id, targetSignatureStaleMessage(this.id, this.#signatureKey, actualKey));
     if (this.#staleEvent) throw bundleStaleError(this.id, staleEventMessage(this.id, this.#staleEvent));
+    for (const draw of this.#draws) assertDrawGeometryUsable(draw, `bundle '${this.id}' replay geometry`);
   }
 
   remember(draw: InternalDraw): void {

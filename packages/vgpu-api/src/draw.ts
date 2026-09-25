@@ -14,7 +14,7 @@ import { hasStencilAspect, isTarget } from "./target-utils.ts";
 import { blendConstantInvalidError, blendInvalidError, claimedGroupNativeValidationError, colorsInvalidError, cullInvalidError, depthInvalidError, entryInvalidError, frontFaceInvalidError, indirectInvalidError, meshRangeInvalidError, multisampleInvalidError, stencilInvalidError, storageStageLimitError, surfaceNotInFrameError, targetRequiredError, unclippedDepthInvalidError, VGPUError, writeMaskInvalidError } from "./errors.ts";
 import { isFrameActive, isSurface } from "./surface.ts";
 import { assertDeviceUsable } from "./lifecycle.ts";
-import { geometryLayoutResolver, type GeometryLayoutResolvable } from "./draw-protocols.ts";
+import { geometryLayoutResolver, geometryLiveness, geometryLivenessOf, type GeometryLayoutResolvable } from "./draw-protocols.ts";
 import { resolveIndirect } from "./indirect.ts";
 import type { StorageBuffer } from "./api-types.ts";
 import { FRAME_DRAWABLE, type FrameDrawableProtocol } from "./frame-protocols.ts";
@@ -555,6 +555,7 @@ export class InternalDraw implements Draw {
 
   #encodeGeometry(pass: GPURenderPassEncoder, callOpts: DrawCallOptions = {}): void {
     const geometry = drawState(this).opts.geometry;
+    geometryLivenessOf(geometry)?.[geometryLiveness](`${this.label}.geometry`);
     if (geometry?.vertexBuffers) geometry.vertexBuffers.forEach((buffer, index) => pass.setVertexBuffer(index, buffer));
     if (callOpts.indirect !== undefined) return this.#encodeIndirect(pass, geometry, callOpts);
     const counts = resolveDrawCounts(this.label, geometry, drawState(this).opts, callOpts);
@@ -1113,6 +1114,11 @@ export function drawStencilWritingOps(draw: Draw): readonly string[] {
 
 export function encodeDraw(draw: InternalDraw, pass: GPURenderPassEncoder, target: Target | TargetSignature, opts: DrawCallOptions = {}, claimValidation?: (result: ClaimedGroupValidationResult) => void, capture?: UniformCapture): void {
   draw.encode(pass, target, opts, claimValidation, capture);
+}
+
+/** @internal Revalidates geometry captured by a draw before render-bundle replay. */
+export function assertDrawGeometryUsable(draw: InternalDraw, where: string): void {
+  geometryLivenessOf(drawState(draw).opts.geometry)?.[geometryLiveness](where);
 }
 
 function drawState(draw: Draw): DrawState {
