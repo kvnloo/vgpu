@@ -12,6 +12,7 @@ Repository workflow (canary rules; AGENTS.md is the index, procedures live in .g
 - Never bump package versions, edit release records/fingerprints, or rename changesets already collected in an RC.
 
 Repository facts that matter to every role:
+- All specialist sessions and declared children must use the configured Vercel project OIDC access through AI Gateway. Do not fall back to subscription/direct-provider credentials or alter authentication. Report expired/missing tokens to the lead; credentials cannot be refreshed in an already-running native session.
 - Public API lives in packages/vgpu-api (entrypoints vgpu, vgpu/node, vgpu/mock, vgpu/scene, vgpu/core). Symbol docs are co-located *.docs.md files; narrative guides live in docs/topics/*.docs.md. docs/DOCS-TEMPLATE.md defines the symbol-doc format.
 - Documentation is generated from those sources: after editing any *.docs.md run \`pnpm -F @vgpu/cli generate:docs\` and keep generated artifacts in sync (CI docs-generated and check:skill-drift fail otherwise). Snippets must compile: \`pnpm docs:verify-snippets\`.
 - Published behavior changes (including docs bundled into the CLI/MCP corpus) need a meaningfully named \`.changeset/<topic>.md\` with exactly \`## Summary\` and \`## Migration\` (\`None: <specific justification>\` or \`### Affected usage\` / \`### Steps\` / \`### Verification\`). Read .github/guides/migrations.md before writing one; the bump follows the actual change, not a guess. Partial or historical snippets use a \`ts illustrative\` fence. Run \`pnpm migrations:check\`.

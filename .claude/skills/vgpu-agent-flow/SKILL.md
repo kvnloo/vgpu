@@ -178,7 +178,9 @@ For each lane that can start:
 
 ## Personal access (per user, not committed)
 
-Research runs on fx through AI Gateway, which needs an explicit connection. Use the OIDC token of
+All vgpu specialists, including Codex/Claude implementations and child writers/reviewers, must use
+Vercel project OIDC through AI Gateway so repository work is attributed to the project. Do not
+fall back to native subscriptions, direct provider keys, or an unrelated Gateway key. Use the OIDC token of
 the `vercel-labs/vgpu` project, configured once in the **main checkout** (worktrees read it from
 there):
 
@@ -195,12 +197,22 @@ vercel env pull .env.local --yes                       # writes VERCEL_OIDC_TOKE
 ```json
 {
   "access": {
+    "codex": [{ "type": "vercel-oidc", "project": ".", "envFile": ".env.local" }],
+    "claudeCode": [{ "type": "vercel-oidc", "project": ".", "envFile": ".env.local" }],
     "fx": [{ "type": "vercel-oidc", "project": ".", "envFile": ".env.local" }]
   }
 }
 ```
 
-Verify with `npx subharness check repo:graphics-researcher`. The OIDC token expires after about
-12 hours; when fx fails with an expired-token error, re-run `vercel env pull .env.local --yes` in
-the main checkout. Without fx access the researchers fall back to Codex. Codex and Claude Code use
-their native subscription logins by default.
+Verify every role with `pnpm exec subharness check repo:<name>`, including implementation, writer,
+reviewer, and both researchers. A readiness check validates startup, not provider quota or a paid
+inference result. Never print tokens or commit `.env.local`/`agents.local.json`.
+
+The OIDC token expires after about 12 hours. The lead may renew it for this established project
+through the existing authenticated Vercel CLI, following Subharness's `sdk/access-config.md`;
+children report failures instead of racing to change shared credentials. Do not switch billing
+routes when renewal fails. Credential changes apply only to new native sessions: checkpoint and
+close older sessions, then start new sessions from those artifacts. A follow-up to an existing
+session retains its original credentials. Record which sessions were restarted and the verified
+project/expiry, without exposing credentials. The main-checkout access file covers linked worktrees;
+a worktree-local copy is not an override.
