@@ -12,6 +12,7 @@ import {
   snapshotTarPath,
 } from "../lib/paths.ts";
 import { isSceneTask } from "../lib/scene-auth.mjs";
+import { observeSceneGuidanceInstall } from "../lib/scene-guidance.ts";
 import { requireTaskId } from "../lib/task.ts";
 import { verifyN1HeroShader } from "../lib/verify/n1-hero-shader.mjs";
 import { verifyNextBuild } from "../lib/verify/next-build.mjs";
@@ -40,6 +41,7 @@ export default defineHook({
         const { stage } = recordSceneTurn(sessionId, turnId);
         const contract = sceneContract(taskId, stage);
         const sandbox = await ctx.getSandbox();
+        const sceneGuidance = await observeSceneGuidanceInstall(sandbox);
         const workspaceBytes = await captureWorkspaceTar(sandbox);
         writeTar(snapshotAttemptTarPath(sessionId, turnId, metaId), workspaceBytes);
         writeTar(snapshotTarPath(sessionId), workspaceBytes);
@@ -71,6 +73,7 @@ export default defineHook({
           cleanupOk,
           removedPath: verification.removedPath,
           evidenceExported,
+          sceneGuidance,
           completedAt: new Date().toISOString(),
         };
         // Intentionally the last host write for this attempt.

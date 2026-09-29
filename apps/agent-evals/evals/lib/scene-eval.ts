@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import type { EveEvalContext, EveEvalTurn } from "eve/evals";
+import { defineEval, type EveEvalContext, type EveEvalTurn } from "eve/evals";
 import { equals } from "eve/evals/expect";
 import { PNG } from "pngjs";
 import {
@@ -30,6 +30,7 @@ import {
 import { gradeSceneOutput } from "./grade-scene.mjs";
 import { bashCalls, docsUsage, sourceFiles } from "./transcript.ts";
 import { turnFailure } from "./turn-failure.mjs";
+import { parseSceneExperimentEnv } from "../../scripts/scene-guidance.mjs";
 
 type SceneTaskId = "scene-robot-arm" | "scene-shader-bindings" | "scene-warehouse";
 
@@ -46,13 +47,34 @@ interface SceneAttemptRecord extends Partial<Correlation> {
   classification?: string;
 }
 
-export async function runSceneEval(t: EveEvalContext, taskId: SceneTaskId): Promise<void> {
+export function sceneEvalDefinitions(
+  taskId: SceneTaskId,
+  description: string,
+  env: NodeJS.ProcessEnv = process.env,
+) {
+  const { repetitions } = parseSceneExperimentEnv(env);
+  const definitions = Array.from({ length: repetitions }, (_, index) =>
+    defineEval({
+      description,
+      timeoutMs: 1_200_000,
+      test: (t) => runSceneEval(t, taskId, { repetition: index + 1 }),
+    }),
+  );
+  return repetitions === 1 ? definitions[0]! : definitions;
+}
+
+export async function runSceneEval(
+  t: EveEvalContext,
+  taskId: SceneTaskId,
+  { repetition = 1 }: { repetition?: number } = {},
+): Promise<void> {
   assertSceneAuth(taskId);
   if (t.target.kind !== "local") t.skip(`scene artifact export requires a local target (got ${t.target.kind})`);
 
   const run = {
     taskId,
-    ...collectSceneRunProvenance(),
+    repetition,
+    ...collectSceneRunProvenance(process.env, process.env.VGPU_EVALS_TARBALLS_DIR || tarballsDir(), taskId),
     startedAt: new Date().toISOString(),
     turns: [] as unknown[],
     limitations: [
@@ -152,21 +174,41 @@ export async function runSceneEval(t: EveEvalContext, taskId: SceneTaskId): Prom
     };
     writeJson(join(attemptDir, "grade.json"), turnRecord);
     run.turns.push(turnRecord);
-    writeJson(join(snapshotDir(sessionId), "scene-run.json"), { ...run, updatedAt: new Date().toISOString() });
+    writeJson(join(snapshotDir(sessionId), "scene-run.json"), {
+      ...run,
+      templateProvenance: readTemplateProvenance(process.env, process.env.VGPU_EVALS_TARBALLS_DIR || tarballsDir(), taskId),
+      updatedAt: new Date().toISOString(),
+    });
   }
 
-  if (sessionId) writeJson(join(snapshotDir(sessionId), "scene-run.json"), { ...run, completedAt: new Date().toISOString() });
+  if (sessionId) writeJson(join(snapshotDir(sessionId), "scene-run.json"), {
+    ...run,
+    templateProvenance: readTemplateProvenance(process.env, process.env.VGPU_EVALS_TARBALLS_DIR || tarballsDir(), taskId),
+    completedAt: new Date().toISOString(),
+  });
 }
 
 export function collectSceneRunProvenance(
   env: NodeJS.ProcessEnv = process.env,
   tarballDirectory = env.VGPU_EVALS_TARBALLS_DIR || tarballsDir(),
+  taskId?: SceneTaskId,
 ) {
   let manifest: {
     sourceKey?: string;
     gitSha?: string;
     gitBranch?: string;
     tarballs?: { name?: string; version?: string; file?: string }[];
+    sceneGuidance?: {
+      experiment?: string;
+      variant?: string;
+      baselineGitSha?: string;
+      currentDocsGitSha?: string;
+      runtimeGitSha?: string;
+      docsManifestPath?: string;
+      docsSha256?: string;
+      counterpartDocsSha256?: string;
+      dependency?: { name?: string; version?: string };
+    };
   } = {};
   let manifestError: string | null = null;
   try {
@@ -180,6 +222,9 @@ export function collectSceneRunProvenance(
     if (path && existsSync(path)) digest = sha256(readFileSync(path));
     return { name: entry.name ?? "unknown", version: entry.version ?? "unknown", file: entry.file ?? "unknown", sha256: digest };
   });
+  const templateProvenance = taskId
+    ? readTemplateProvenance(env, tarballDirectory, taskId, manifest.sceneGuidance?.docsSha256)
+    : null;
   return {
     contractRevision: SCENE_CONTRACT_REVISION,
     model: env.VGPU_EVALS_MODEL || "anthropic/claude-sonnet-5",
@@ -190,11 +235,42 @@ export function collectSceneRunProvenance(
     tarballManifest: join(tarballDirectory, "tarballs.json"),
     tarballManifestError: manifestError,
     tarballs,
+    sceneGuidance: manifest.sceneGuidance ?? null,
+    templateProvenance,
     eveVersion: resolvedPackageVersion("eve"),
     sandboxBackend: env.VGPU_EVALS_SANDBOX || "docker",
     dockerImage: env.VGPU_EVALS_DOCKER_IMAGE || "unavailable",
     hostRuntime: { node: process.version, platform: process.platform, arch: process.arch },
   };
+}
+
+function readTemplateProvenance(
+  env: NodeJS.ProcessEnv,
+  tarballDirectory: string,
+  taskId: SceneTaskId,
+  knownDocsSha256?: string,
+): unknown {
+  let docsSha256 = knownDocsSha256;
+  if (!docsSha256) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(tarballDirectory, "tarballs.json"), "utf8")) as {
+        sceneGuidance?: { docsSha256?: string };
+      };
+      docsSha256 = manifest.sceneGuidance?.docsSha256;
+    } catch {
+      return null;
+    }
+  }
+  if (!docsSha256) return null;
+  try {
+    return JSON.parse(readFileSync(join(
+      env.VGPU_EVALS_WORK_DIR || join(dirname(tarballDirectory), ".."),
+      "template-provenance",
+      `${taskId}-${docsSha256}.json`,
+    ), "utf8"));
+  } catch {
+    return { unavailable: true };
+  }
 }
 
 export function validateSceneAttempt(expected: Correlation, record: SceneAttemptRecord): string[] {
@@ -243,6 +319,7 @@ function collectSceneSourceHints(taskId: SceneTaskId, root: string) {
     semanticReview: "pending lead review; text hints do not establish runtime API or shader use",
     mentionsSceneImport: /["']vgpu\/scene(?:\/gpu)?["']/.test(source),
     mentionsVgpuNodeImport: /["']vgpu\/node["']/.test(source),
+    mentionsMathImport: /["']math["']/.test(source),
     suppliedShaderTextHints: taskId === "scene-shader-bindings" ? {
       mentionsIntegrationWgsl: /integration\.wgsl/.test(source),
       mentionsStyle: /\bstyle\b/.test(source),

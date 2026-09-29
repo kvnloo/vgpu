@@ -28,6 +28,12 @@ import {
   validateSceneAuth,
 } from "../apps/agent-evals/agent/lib/scene-auth.mjs";
 import { sourceKey } from "../apps/agent-evals/scripts/pack-vgpu.mjs";
+import {
+  parseSceneExperimentEnv,
+  prepareSceneGuidanceExperiment,
+  validatePreparedSceneGuidanceVariant,
+  validateSceneExperimentRuntime,
+} from "../apps/agent-evals/scripts/scene-guidance.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_DIR = join(REPO_ROOT, "apps", "agent-evals");
@@ -95,9 +101,18 @@ function usage(problem) {
 }
 
 const { taskId, skipPack, forwarded } = consumeSceneLauncherArgs(process.argv.slice(2));
+let sceneExperiment;
+try {
+  sceneExperiment = parseSceneExperimentEnv(process.env);
+} catch (error) {
+  usage(error.message);
+}
 
 if (!taskId) usage("--task <id> is required.");
 if (!knownTasks().includes(taskId)) usage(`unknown task "${taskId}".`);
+if (!isSceneTask(taskId) && (sceneExperiment.variant !== null || sceneExperiment.repetitions !== 1)) {
+  usage("VGPU_EVALS_SCENE_GUIDANCE and VGPU_EVALS_SCENE_REPETITIONS apply only to scene evals.");
+}
 if (skipPack && !isSceneTask(taskId)) usage("--skip-pack is available only for scene evals.");
 if (isSceneTask(taskId) && !skipPack) {
   usage("scene evals require a Node 22 pack followed by this Node 24 launcher with --skip-pack.");
@@ -115,6 +130,12 @@ process.env.VGPU_EVALS_TASKS_DIR ??= TASKS_DIR;
 const sceneAuth = validateSceneAuth(taskId, process.env);
 if (!sceneAuth.ok) {
   process.stderr.write(`pnpm agent-evals: ${sceneAuth.reason}.\nNothing was packed, fetched, or started.\n`);
+  process.exit(EXIT_ENVIRONMENT);
+}
+try {
+  validateSceneExperimentRuntime(sceneExperiment, process.env);
+} catch (error) {
+  process.stderr.write(`pnpm agent-evals: ${error.message}.\nNothing was packed, fetched, or started.\n`);
   process.exit(EXIT_ENVIRONMENT);
 }
 
@@ -190,8 +211,9 @@ if (requestedModel) {
 }
 
 const workDir = join(PACKAGE_DIR, ".work");
-const resolvedTarballsDir = resolveSceneTarballsDir(PACKAGE_DIR, process.env);
-const manifestPath = join(resolvedTarballsDir, "tarballs.json");
+const sourceTarballsDir = resolveSceneTarballsDir(PACKAGE_DIR, process.env);
+let resolvedTarballsDir = sourceTarballsDir;
+let manifestPath = join(resolvedTarballsDir, "tarballs.json");
 if (skipPack) {
   const current = sourceKey();
   const packed = validatePackedArtifacts(manifestPath, current);
@@ -213,6 +235,22 @@ if (skipPack) {
   }
 }
 
+if (sceneExperiment.variant !== null) {
+  try {
+    const fixture = prepareSceneGuidanceExperiment({
+      sourceTarballsDir,
+      outputRoot: join(workDir, "scene-guidance"),
+      repoRoot: REPO_ROOT,
+    });
+    resolvedTarballsDir = fixture.variants[sceneExperiment.variant].tarballsDir;
+    validatePreparedSceneGuidanceVariant(resolvedTarballsDir, sceneExperiment.variant);
+    manifestPath = join(resolvedTarballsDir, "tarballs.json");
+  } catch (error) {
+    process.stderr.write(`pnpm agent-evals: scene guidance preparation failed: ${error.message}\n`);
+    process.exit(EXIT_ENVIRONMENT);
+  }
+}
+
 // Hand the runtime ABSOLUTE paths.
 //
 // eve's dev runtime snapshots the app and runs the compiled modules from
@@ -223,7 +261,7 @@ if (skipPack) {
 // there. These variables are the contract that keeps the packer (this process),
 // the runtime (snapshot) and the eval (CLI process) pointing at one directory.
 process.env.VGPU_EVALS_WORK_DIR ??= workDir;
-process.env.VGPU_EVALS_TARBALLS_DIR ??= resolvedTarballsDir;
+process.env.VGPU_EVALS_TARBALLS_DIR = resolvedTarballsDir;
 process.env.VGPU_EVALS_REPO_ROOT ??= REPO_ROOT;
 
 // Hash of THIS TASK's seed tree, so the sandbox template is rebuilt when its
@@ -254,6 +292,11 @@ try {
   process.stderr.write(`pnpm agent-evals: could not read ${manifestPath}: ${error.message}\n`);
   process.exit(1);
 }
+
+// The selector is host orchestration only. The selected tarball manifest carries
+// the corpus hash; neither a condition label nor its source commit enters the
+// agent runtime or sandbox environment.
+delete process.env.VGPU_EVALS_SCENE_GUIDANCE;
 
 // `eve eval` identifies evals by ID (the `evals/<id>.eval.ts` filename minus
 // its extension, confirmed via `eve eval --list`), not by file path — passing

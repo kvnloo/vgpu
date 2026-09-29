@@ -66,7 +66,7 @@ packs as it always has.
 
 ### Local tests
 
-The four `node:test` files make no model calls, no network requests, and no GPU calls:
+The `node:test` files make no model calls, no network requests, and no GPU calls:
 
 ```bash
 fnm exec --using=24 node --test apps/agent-evals/tests/*.test.mjs
@@ -82,6 +82,8 @@ so run the command above explicitly.
 | `tests/grade-scene.test.mjs` | Grader boundaries on synthetic analytic images and state |
 | `tests/scene-harness.test.mjs` | Turn/attempt paths, fresh-copy execution, timeouts, cleanup, seed contents |
 | `tests/scene-auth.test.mjs` | OIDC guard, rejected API keys, `--skip-pack` consumption and manifest checks |
+| `tests/scene-guidance.test.mjs` | [Docs guidance experiment](#docs-guidance-experiment-opt-in): selector and repetition parsing, pinned model/image, corpus restriction on synthetic and the real `a8a9bc8a`/`929b97f5` manifests, baseline tarball isolation and tamper rejection, lock normalization, unchanged default seeds, per-turn deviation records |
+| `tests/scene-guidance-analysis.test.mjs` | Delivered guide content versus discovery, per-turn exposure, truncation, event deduplication, usage totals, and possible contamination |
 
 Synthetic images validate grader logic only. They are not native controls.
 
@@ -135,6 +137,172 @@ harness regressions exercise that hook transport with a faithful fake whose comm
 exit codes, including failed source copy, manifest, evidence export, and cleanup. Paid pilots are
 the end-to-end check of the real Eve transport, exact event correlation, cleanup marker, driver,
 and grader together.
+
+## Docs guidance experiment (opt-in)
+
+`VGPU_EVALS_SCENE_GUIDANCE` runs a scene task as one arm of a docs-only comparison: the agent gets
+the same runtime and the same pinned `math@0.1.0` in both arms, and only the `vgpu docs` corpus
+differs. Leave it unset for ordinary runs — unset or empty changes nothing about packing, seeds,
+installs, prompts, or grading.
+
+| Value | Installed `vgpu docs` corpus |
+| --- | --- |
+| `baseline` | The generated docs manifest from `a8a9bc8a`, before the scene-math guide |
+| `math` | The generated docs manifest from `929b97f5`: adds `/guides/scene-math.docs.md` and the "Scope and external math" content in `/guides/scene-composition.docs.md` |
+
+Any other value (including `BASELINE`) exits with environment code **2** before anything is
+packed or started, and so does setting it for a non-scene task. Contracts, prompts, seeds, graders,
+and thresholds are the `scene-evals-v1` ones in both arms. Experiment runs install `math` and
+default runs do not, so never pool the two.
+
+### Launch an arm
+
+Pack exactly as for a default run, then launch each arm in its own process with the fixed model
+and the pinned image:
+
+```bash
+fnm exec --using=22 pnpm build
+fnm exec --using=22 node apps/agent-evals/scripts/pack-vgpu.mjs --skip-build
+
+export VGPU_EVALS_MODEL=anthropic/claude-sonnet-5
+export VGPU_EVALS_DOCKER_IMAGE=ghcr.io/vercel/eve@sha256:de79f9a495add7cd1691e3496afc1c3227b0846f9ae0b26126f120c91af3445c
+VGPU_EVALS_SCENE_GUIDANCE=baseline fnm exec --using=24 node scripts/agent-evals.mjs \
+  --task scene-robot-arm --skip-pack --max-concurrency 1 --timeout 1200000 --verbose
+```
+
+Experiment mode refuses to start unless `VGPU_EVALS_MODEL` is exactly `anthropic/claude-sonnet-5`
+and `VGPU_EVALS_DOCKER_IMAGE` is exactly that digest; the unset defaults do not count. The check
+runs after the [OIDC guard](#model-access-project-oidc-only), exits **2**, and nothing is packed,
+fetched, or started. Because `VGPU_EVALS_MODEL` is set, the launcher's 16-token model preflight
+also runs.
+
+`VGPU_EVALS_SCENE_REPETITIONS=2` makes the task's eval file export two cases instead of one. Eve
+names dataset entries by file plus index (`scene-robot-arm/0000`, `scene-robot-arm/0001`), and
+`--task` still selects both. Each case is a fresh session from the same cached template, and
+`scene-run.json` records `repetition` as `1` or `2`. Unset or `1` keeps the original single
+eval; an empty string or any other value exits **2**. It applies to scene tasks only, with or without
+`VGPU_EVALS_SCENE_GUIDANCE`. The frozen 12-slot comparison leaves it unset: each slot is one
+standalone Eve invocation, and the lead-owned ledger records the outer repetition.
+
+The completed September 29 comparison is recorded in
+[findings](scene-math-evals-findings.md) and [machine-readable results](scene-math-evals-results.json).
+
+The arm label stays on the host. The launcher deletes `VGPU_EVALS_SCENE_GUIDANCE` from its
+environment before it spawns Eve, and selects the arm only by pointing `VGPU_EVALS_TARBALLS_DIR` at
+that arm's prepared directory. Tarball file names are identical in both arms, so the sandbox sees
+the same `/workspace/.vgpu-tarballs/vgpu-0.5.0.tgz` either way.
+
+### Prepared tarball pairs
+
+The launcher builds both arms from the checked pack before Eve starts, after the usual
+[`--skip-pack` staleness check](#running-it). You can also prepare or revalidate the pair by hand;
+the command prints the path of its `scene-guidance.json`:
+
+```bash
+fnm exec --using=24 node apps/agent-evals/scripts/scene-guidance.mjs \
+  [--tarballs <pack-dir>] [--out <fixtures-dir>]   # defaults: .work/tarballs, .work/scene-guidance
+```
+
+Preparation fails, and the launcher exits **2** with `scene guidance preparation failed`, unless
+all of these hold:
+
+- the source pack's `sourceKey` equals the current `sourceKey()`;
+- the packed vgpu tarball's `package/dist/cli/lib/generated/docs-manifest.generated.js` is
+  byte-identical to `packages/vgpu/lib/generated/docs-manifest.generated.js` at `929b97f5`;
+- compared with the same file at `a8a9bc8a`, everything outside `records` is identical, exactly one
+  record is added (`/guides/scene-math.docs.md`, symbol `scene-math`, repo path
+  `docs/topics/scene-math.docs.md`), none is removed, and exactly one changes
+  (`/guides/scene-composition.docs.md`), in its `content` field only. Records are keyed by virtual
+  path plus anchor (or symbol when there is no anchor).
+
+Both arms get byte-for-byte copies of every tarball. For `baseline` only, the vgpu tarball is
+extracted, that one manifest is replaced with the `a8a9bc8a` bytes, and the tree is re-archived
+with `tar` — not `npm pack`, whose `prepack` regenerates the docs. The result is extracted again
+and must differ from the packed tree in that one path only, comparing file contents, modes, and symlinks.
+Every file in it is then scanned for treatment markers (`/guides/scene-math.docs.md`,
+`docs/topics/scene-math.docs.md`, `# Using math with scene data`, `math@0.1.0`); any hit fails.
+
+The pair lands in `.work/scene-guidance/scene-math-guidance-v1-<sourceKey>-<baseline12>-<math12>/`,
+named from the source key and the first 12 hex digits of each corpus hash:
+
+| Path | Contents |
+| --- | --- |
+| `scene-guidance.json` | Experiment, `sourceKey`, `runtimeGitSha`, `baselineGitSha`, `currentDocsGitSha`, dependency, record comparison, per-arm corpus and vgpu tarball hashes |
+| `baseline/tarballs/`, `math/tarballs/` | The six tarballs plus a `tarballs.json` that adds a `sha256` to every entry and a `sceneGuidance` block |
+| `corpora/baseline-docs-manifest.generated.js`, `corpora/math-docs-manifest.generated.js` | Both corpora's exact bytes |
+
+`sceneGuidance` carries `experiment`, `variant`, `baselineGitSha`, `currentDocsGitSha`,
+`runtimeGitSha`, `docsManifestPath`, `docsSha256`, `counterpartDocsSha256`, `dependency`,
+`comparison`, and `sourceTarballsManifestSha256`. `sourceKey` is unchanged: both arms run the same
+runtime tree.
+
+A fixture directory is written once — built in a staging directory, then renamed into place.
+When it already exists, the launcher revalidates it instead of rebuilding: identity and corpus
+hashes in `scene-guidance.json`, each arm's label and `math@0.1.0` identity, every tarball's
+SHA-256, and the docs manifest hash read back out of the vgpu tarball. A mismatch fails as a tamper
+or stale artifact and is never repaired in place; delete that directory to rebuild it. A new pack
+or a different corpus gets a new directory.
+
+### Template cache per corpus
+
+The sandbox revalidation key is `vgpu-<sourceKey>-<docsSha256>-<taskId>-<seedHash>`, using the
+arm's corpus hash, not its name. The two arms never share a cached template; repetitions of one
+arm do. Default runs put `default-corpus` in that position.
+
+### Bootstrap corpus and math checks
+
+In experiment mode only, bootstrap adds `math@0.1.0` to the same `npm install` as the tarballs and
+`pngjs`. After both installs and before `vgpu doctor` — so before any model turn — it fails the
+template as an infrastructure error unless:
+
+- exactly one `*/dist/cli/lib/generated/docs-manifest.generated.js` exists under `node_modules`;
+- that file's SHA-256 equals the arm's `docsSha256`;
+- `node_modules/math/package.json` and the lock's `node_modules/math` entry are both `0.1.0`, and
+  the locked integrity equals the pinned `sha512-hq5K…` (`SCENE_EXPERIMENT_MATH_INTEGRITY`).
+
+It then writes `.work/template-provenance/<taskId>-<docsSha256>.json`: arm, `sourceKey`, template
+key, expected and installed docs hashes, installed manifest paths, `vgpu` and `math` versions, math
+integrity, a SHA-256 of `package-lock.json` with the vgpu entry's `resolved`/`integrity` normalized
+(equal across arms when only the corpus differs), a SHA-256 of `npm ls --all --json`, model, image,
+and sandbox Node. Bootstrap runs once per template, so this file describes the cached build. The
+eval rereads it every time it writes `scene-run.json` and stores it as `templateProvenance`, or
+`{ "unavailable": true }` when it is missing; outside experiment mode the field is `null`.
+
+### Per-turn provenance and deviations
+
+Before archiving each turn, the `turn.completed` hook reads the installed state again and stores it
+as `sceneGuidance` in that attempt's `complete.json`, which `scene-run.json` keeps under each turn's
+`complete`:
+
+- `condition`, and `expected` `docsSha256`, `vgpuVersion`, `mathVersion` from the arm's manifest;
+- `observed` `docsSha256`, `docsManifestPaths`, `vgpuVersion`, `mathVersion`;
+- `protocolDeviation`, plus `observationError` when the read itself failed.
+
+`protocolDeviation` is `true` when there is not exactly one installed docs manifest, its hash
+differs from the arm's, or the installed `vgpu` or `math` version differs — for example after the
+agent installs `vgpu@latest`. It is observational: it never changes a
+gate, a classification, or the run outcome, and the run is kept. Outside experiment mode it is
+`null`.
+
+The run-level record adds `repetition`, the arm's `sceneGuidance` block, and `templateProvenance`.
+Source hints add `mentionsMathImport`, a regex over source text for a `"math"` or `'math'` string in
+every mode; like the other hints, it is not evidence that the package executed.
+
+These records prove which corpus was installed at bootstrap and at the end of each turn. They do not
+show a swap and restore inside one turn, and they do not show what the agent read: installed docs
+are available, not consumed.
+
+Analyze a saved Eve transcript with:
+
+```bash
+node apps/agent-evals/scripts/analyze-scene-guidance.mjs events.ndjson baseline analysis.json
+```
+
+Use `math` for the guidance arm. This reports usage, tool counts, and guide markers in returned
+tool content, including the turn and step where content first appeared. A title or slug alone
+counts as surfaced; registered section headings count as content delivered. Neither proves
+understanding. Baseline surfaced-only matches are possible contamination requiring transcript
+review. Inspect archived source to determine whether imported math or scene helpers actually run.
 
 ## The executable contract
 

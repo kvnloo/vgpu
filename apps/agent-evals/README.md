@@ -60,6 +60,8 @@ own build copies the CLI out of it and its `prepack` generates the docs that
 The three `scene-*` tasks share a contract, a rerun verifier and a host grader. They are
 documented separately in [scene-evals.md](scene-evals.md); findings from lead-run pilots go in
 [scene-evals-findings.md](scene-evals-findings.md).
+The completed math-guidance comparison has separate
+[findings](scene-math-evals-findings.md) and [machine-readable results](scene-math-evals-results.json).
 
 ### s2-gradient
 
@@ -428,6 +430,8 @@ and either one failing is an environment error (see
 | `VGPU_EVALS_DOCKER_IMAGE` | `ghcr.io/vercel/eve:latest` | pin it when you need reproducibility |
 | `VGPU_EVALS_WORK_DIR` | `<package>/.work` | tarballs, per-session snapshots and scene per-turn attempts |
 | `VGPU_EVALS_TASK` | — | set by `--task`; which seed bootstrap materializes. Required, and bootstrap throws without it |
+| `VGPU_EVALS_SCENE_GUIDANCE` | unset (off) | scene tasks only: `baseline` or `math` runs one arm of the [docs guidance experiment](scene-evals.md#docs-guidance-experiment-opt-in) and requires `VGPU_EVALS_MODEL=anthropic/claude-sonnet-5` plus the pinned `ghcr.io/vercel/eve@sha256:…` image; any other value exits 2 |
+| `VGPU_EVALS_SCENE_REPETITIONS` | `1` | scene tasks only: `2` exports two fresh-session cases per task; any other value exits 2 |
 | `VGPU_EVALS_JUDGE_MODEL` | `openai/gpt-4.1-mini` | text judge for the docs-usage questions |
 | `VGPU_EVALS_VISION_JUDGE_MODEL` | `VGPU_EVALS_JUDGE_MODEL` | image-capable judge for n1's trail screenshots; separate so the two can be pinned independently |
 
