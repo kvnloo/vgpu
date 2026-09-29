@@ -23,6 +23,8 @@ talk to the human and never see this conversation — each prompt must carry the
 | `repo:writer` | Claude `claude-opus-5.5` high → Codex `gpt-5.6-sol` high | Docs in house style (called by implementer, or by you for docs-only work) |
 | `repo:reviewer` | Claude `claude-opus-5.5` high → Codex `gpt-6-astra` high | Read-only review (called by implementer per task, and by you after integration) |
 | `repo:builder` | Codex `gpt-5.6-sol` high → Claude `claude-opus-5.5` high | Applies a bounded list of integration-review findings |
+| `repo:example-builder` | Claude `claude-opus-5.5` xhigh | One docs gallery example end to end from a brief; sees it running through `capture_preview`; runs `example-reviewer`; commits |
+| `repo:example-reviewer` | Claude `claude-opus-5.5` high | Example review: code plus hands-on interaction checks through `capture_preview` (called by example-builder) |
 
 Fallback (→) only happens when the first harness is unavailable before the task starts (missing
 CLI, no login, no fx Gateway access). A task that fails after starting is never retried elsewhere;
@@ -156,6 +158,30 @@ For each lane that can start:
    merging, closing sources, or releasing.
 4. Remove finished worktrees: `git worktree remove .context/worktrees/<topic>-<lane>`.
 
+## Gallery examples
+
+A new `apps/docs/examples/<slug>` example skips Phases 1–4: write
+`.context/work/<topic>/briefs/<slug>.md` (idea, quality bar, interactions, constraints, closest
+reference examples) and run one builder session per example in the target checkout:
+
+```sh
+npx subharness run repo:example-builder --prompt "Topic: <topic>. Build the example in .context/work/<topic>/briefs/<slug>.md. Base ref: origin/canary."
+```
+
+The builder carries the example contract in `.subharness/tools/example-playbook.ts` and these tools:
+`capture_preview` (`.subharness/tools/preview/`) loads `/preview/<slug>` from the checkout's docs dev
+server in headless WebGPU Chrome, replays scripted mouse/touch/keyboard input, and returns
+screenshots, burst contact sheets, console problems, and GPU/frame timing; `render_thumbnail`,
+`verify_example`, and `bundle_report` (`.subharness/tools/example/`) cover thumbnails, the
+pre-commit checklist, and chunk budgets. Two also run from a shell:
+`node .subharness/tools/preview/cli.ts <slug> --steps '<json>'` and
+`node .subharness/tools/thumbs/mesa.ts <slug> [--update]` (CI's pinned Mesa renderer).
+
+When several examples are built in sequence, improve the builder between them: ask its session what
+context or tooling would have saved time (`subharness send <session-id> --prompt "..."`), evaluate
+each suggestion against the next brief and the repository rules, apply the ones that generalize to
+the playbook or tools, and log feedback, verdicts, and changes in `.context/work/<topic>/iterations.md`.
+
 ## Running specialists
 
 - Prefer one ordinary `subharness run ...` per specialist through your background-command
@@ -168,7 +194,9 @@ For each lane that can start:
   Continue coordinating the authorized implementation after each result rather than ending at launch.
 - Follow up in the same session with `subharness send <session-id> --prompt "..."`; cancel with
   `subharness cancel <task-id>`. `subharness dashboard` shows live sessions.
-- Exit code 0 means a response arrived, not that the goal was met — read the response.
+- Exit code 0 means a response arrived, not that the goal was met — read the response. A response
+  with `State: waiting` means the specialist paused for a child; follow it with
+  `subharness wait <task-id> --after <response-id>` until `completed`.
 - Version 0.0.5 returns `approval_required` for supported native permission requests. Inspect
   the actual operation, existing user authorization and returned schema; answer only an authorized,
   offered choice with `subharness respond <request-id> --content-file <path>`, then observe the same
