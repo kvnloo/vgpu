@@ -248,7 +248,30 @@ async function verifySceneGuidanceInstall(
   taskId: string,
 ): Promise<void> {
   const guidance = manifest.sceneGuidance;
-  if (!guidance) return;
+  const requiresMathIntegrity = taskId === "scene-math-interop" || Boolean(guidance);
+  if (!requiresMathIntegrity) return;
+  if (!guidance) {
+    const math = await verifyPinnedMathInstall(sandbox, "0.1.0");
+    const vgpuPackageText = await sandbox.readTextFile({ path: `${WORKSPACE}/node_modules/vgpu/package.json` });
+    const npmLs = await sandbox.run({ command: "npm ls --all --json", workingDirectory: WORKSPACE });
+    const sandboxNode = await sandbox.run({ command: "node -p process.version", workingDirectory: WORKSPACE });
+    const vgpuPackage = vgpuPackageText ? JSON.parse(vgpuPackageText) as { version?: string } : {};
+    writeTemplateProvenance(taskId, {
+      schemaVersion: 1,
+      taskId,
+      sourceKey: manifest.sourceKey,
+      templateKey: `${tarballsFingerprint(tarballsDir())}-${taskId}-${taskSeedFingerprint()}`,
+      packages: { vgpu: vgpuPackage.version ?? "unavailable", math: math.version },
+      mathIntegrity: math.integrity,
+      normalizedPackageLockSha256: normalizedPackageLockSha256(math.lockText),
+      dependencyTreeSha256: sha256(JSON.stringify(JSON.parse(npmLs.stdout ?? "{}"))),
+      model: process.env.VGPU_EVALS_MODEL ?? "unavailable",
+      dockerImage: process.env.VGPU_EVALS_DOCKER_IMAGE ?? "unavailable",
+      sandboxRuntime: { node: (sandboxNode.stdout ?? "").trim() || "unavailable" },
+      recordedAt: new Date().toISOString(),
+    });
+    return;
+  }
   const located = await sandbox.run({
     command:
       "find node_modules -type f -path '*/dist/cli/lib/generated/docs-manifest.generated.js' -print",
@@ -267,26 +290,12 @@ async function verifySceneGuidanceInstall(
     );
   }
 
-  const mathPackageText = await sandbox.readTextFile({ path: `${WORKSPACE}/node_modules/math/package.json` });
+  const math = await verifyPinnedMathInstall(sandbox, guidance.dependency.version);
   const vgpuPackageText = await sandbox.readTextFile({ path: `${WORKSPACE}/node_modules/vgpu/package.json` });
-  const lockText = await sandbox.readTextFile({ path: `${WORKSPACE}/package-lock.json` });
-  if (!mathPackageText || !vgpuPackageText || !lockText) {
+  if (!vgpuPackageText) {
     throw fatal("bootstrap: experiment dependency or package-lock provenance is missing");
   }
-  const mathPackage = JSON.parse(mathPackageText) as { version?: string };
   const vgpuPackage = JSON.parse(vgpuPackageText) as { version?: string };
-  const lock = JSON.parse(lockText) as {
-    packages?: Record<string, { version?: string; integrity?: string }>;
-  };
-  const lockedMath = lock.packages?.["node_modules/math"];
-  if (mathPackage.version !== guidance.dependency.version || lockedMath?.version !== guidance.dependency.version) {
-    throw fatal(
-      `bootstrap: expected ${guidance.dependency.name}@${guidance.dependency.version}, got installed ${String(mathPackage.version)} and locked ${String(lockedMath?.version)}`,
-    );
-  }
-  if (lockedMath.integrity !== SCENE_EXPERIMENT_MATH_INTEGRITY) {
-    throw fatal("bootstrap: math@0.1.0 lock integrity does not match the pinned experiment dependency");
-  }
 
   const npmLs = await sandbox.run({ command: "npm ls --all --json", workingDirectory: WORKSPACE });
   const sandboxNode = await sandbox.run({ command: "node -p process.version", workingDirectory: WORKSPACE });
@@ -302,22 +311,42 @@ async function verifySceneGuidanceInstall(
     expectedDocsSha256: guidance.docsSha256,
     installedDocsSha256,
     installedDocsManifestPaths: manifestPaths,
-    packages: { vgpu: vgpuPackage.version ?? "unavailable", math: mathPackage.version ?? "unavailable" },
-    mathIntegrity: lockedMath.integrity,
-    normalizedPackageLockSha256: normalizedPackageLockSha256(lockText),
+    packages: { vgpu: vgpuPackage.version ?? "unavailable", math: math.version },
+    mathIntegrity: math.integrity,
+    normalizedPackageLockSha256: normalizedPackageLockSha256(math.lockText),
     dependencyTreeSha256: sha256(JSON.stringify(dependencyTree)),
     model: process.env.VGPU_EVALS_MODEL ?? "unavailable",
     dockerImage: process.env.VGPU_EVALS_DOCKER_IMAGE ?? "unavailable",
     sandboxRuntime: { node: (sandboxNode.stdout ?? "").trim() || "unavailable" },
     recordedAt: new Date().toISOString(),
   };
+  writeTemplateProvenance(`${taskId}-${guidance.docsSha256}`, provenance);
+}
+
+function writeTemplateProvenance(name: string, provenance: unknown): void {
   const directory = join(workDir(), "template-provenance");
   mkdirSync(directory, { recursive: true });
-  writeFileSync(
-    join(directory, `${taskId}-${guidance.docsSha256}.json`),
-    `${JSON.stringify(provenance, null, 2)}\n`,
-    "utf8",
-  );
+  writeFileSync(join(directory, `${name}.json`), `${JSON.stringify(provenance, null, 2)}\n`, "utf8");
+}
+
+async function verifyPinnedMathInstall(sandbox: SandboxSession, expectedVersion: string): Promise<{
+  version: string;
+  integrity: string;
+  lockText: string;
+}> {
+  const mathPackageText = await sandbox.readTextFile({ path: `${WORKSPACE}/node_modules/math/package.json` });
+  const lockText = await sandbox.readTextFile({ path: `${WORKSPACE}/package-lock.json` });
+  if (!mathPackageText || !lockText) throw fatal("bootstrap: math package or package-lock provenance is missing");
+  const mathPackage = JSON.parse(mathPackageText) as { version?: string };
+  const lock = JSON.parse(lockText) as { packages?: Record<string, { version?: string; integrity?: string }> };
+  const lockedMath = lock.packages?.["node_modules/math"];
+  if (mathPackage.version !== expectedVersion || lockedMath?.version !== expectedVersion) {
+    throw fatal(`bootstrap: expected math@${expectedVersion}, got installed ${String(mathPackage.version)} and locked ${String(lockedMath?.version)}`);
+  }
+  if (lockedMath.integrity !== SCENE_EXPERIMENT_MATH_INTEGRITY) {
+    throw fatal("bootstrap: math@0.1.0 lock integrity does not match the pinned dependency");
+  }
+  return { version: expectedVersion, integrity: lockedMath.integrity, lockText };
 }
 
 function sha256(value: Uint8Array | string): string {

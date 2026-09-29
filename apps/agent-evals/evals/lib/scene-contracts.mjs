@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { sceneInteropContract, sceneInteropRevision, validateSceneInteropResult } from "./scene-interop.mjs";
 
 export const SCENE_CONTRACT_REVISION = "scene-evals-v1";
 export const SCENE_TASK_IDS = Object.freeze([
   "scene-robot-arm",
   "scene-shader-bindings",
   "scene-warehouse",
+  "scene-math-interop",
 ]);
 
 const A = Object.freeze({
@@ -96,6 +98,7 @@ const PROMPTS = Object.freeze({
 export function sceneContract(taskId, stage) {
   requireSceneTask(taskId);
   if (stage !== 1 && stage !== 2) throw new TypeError(`scene stage must be 1 or 2, got ${stage}`);
+  if (taskId === "scene-math-interop") return sceneInteropContract(stage);
   const requestId = `${taskId}-turn-${stage}`;
   let width;
   let height;
@@ -110,7 +113,7 @@ export function sceneContract(taskId, stage) {
     const initial = { cameraPosition: [0, 0, 8] };
     const moved = { cameraPosition: [0.8, 0.45, 8] };
     input = { version: 1, requestId, frames: stage === 1 ? [initial] : [initial, moved, initial] };
-  } else {
+  } else if (taskId === "scene-warehouse") {
     width = 576;
     height = 576;
     input = {
@@ -119,6 +122,8 @@ export function sceneContract(taskId, stage) {
       items: warehouseItems(),
       frames: stage === 1 ? [WAREHOUSE_FRAMES[0]] : WAREHOUSE_FRAMES,
     };
+  } else {
+    throw new TypeError(`sceneContract has no dispatcher for ${JSON.stringify(taskId)}`);
   }
   return structuredClone({
     revision: SCENE_CONTRACT_REVISION,
@@ -132,6 +137,18 @@ export function sceneContract(taskId, stage) {
   });
 }
 
+export function sceneContractRevision(taskId) {
+  requireSceneTask(taskId);
+  return taskId === "scene-math-interop" ? sceneInteropRevision() : SCENE_CONTRACT_REVISION;
+}
+
+export function sceneFixturePaths(taskId) {
+  requireSceneTask(taskId);
+  if (taskId === "scene-shader-bindings") return ["integration.wgsl"];
+  if (taskId === "scene-math-interop") return ["ecs/README.md", "ecs/world.mjs"];
+  return [];
+}
+
 export function requireSceneTask(taskId) {
   if (!SCENE_TASK_IDS.includes(taskId)) {
     throw new TypeError(`unknown scene task ${JSON.stringify(taskId)}`);
@@ -141,6 +158,7 @@ export function requireSceneTask(taskId) {
 
 export function validateSceneResult(taskId, input, result) {
   requireSceneTask(taskId);
+  if (taskId === "scene-math-interop") return validateSceneInteropResult(input, result);
   const errors = [];
   if (!result || typeof result !== "object" || Array.isArray(result)) errors.push("result must be an object");
   if (result?.version !== 1) errors.push("version must be 1");

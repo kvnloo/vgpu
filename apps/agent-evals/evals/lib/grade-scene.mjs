@@ -44,7 +44,8 @@ export async function gradeSceneOutput({ taskId, input, result, width, height, r
     }
     if (taskId === "scene-robot-arm") gradeRobot(input, result, images, width, height, checks);
     else if (taskId === "scene-shader-bindings") gradeShader(input, result, images, width, height, fixtureUnchanged, checks);
-    else gradeWarehouse(input, result, images, width, height, checks);
+    else if (taskId === "scene-warehouse") gradeWarehouse(input, result, images, width, height, checks);
+    else throw new TypeError(`gradeSceneOutput does not support task ${JSON.stringify(taskId)}`);
   } catch (error) {
     if (error instanceof SceneVerifierError) {
       add(checks, "verifier", false, { reason: error.message });

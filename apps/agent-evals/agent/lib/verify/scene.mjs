@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
-import { sceneInputSha256 } from "../../../evals/lib/scene-contracts.mjs";
+import { sceneFixturePaths, sceneInputSha256 } from "../../../evals/lib/scene-contracts.mjs";
 
 const SOURCE_COPY_EXCLUSIONS = [
   "node_modules", ".git", ".vgpu-tarballs", ".agent-evals", ".next", ".cache", ".work",
@@ -200,7 +200,7 @@ export async function verifySceneInSandbox(sandbox, { taskId, stage, turnId, met
     await runChecked(sandbox, {
       command: `bash -o pipefail -c ${shellQuote([
         `find ${shellQuote(appDir)} -type f -print0 | sort -z | xargs -0 -r sha256sum > ${shellQuote(`${evidenceDir}/source-manifest.txt`)}`,
-        `if [ -f ${shellQuote(`${appDir}/integration.wgsl`)} ]; then sha256sum ${shellQuote(`${appDir}/integration.wgsl`)} > ${shellQuote(`${evidenceDir}/fixture-sha256.txt`)}; fi`,
+        fixtureDigestCommand(taskId, appDir, `${evidenceDir}/fixture-sha256.txt`),
       ].join(" && "))}`,
     }, "source evidence manifest");
     workspaceAfter = await workspaceDigest(sandbox, verificationDir, "workspace-after.txt");
@@ -249,6 +249,14 @@ export async function verifySceneInSandbox(sandbox, { taskId, stage, turnId, met
     }
   }
   return { evidenceTarPath, cleanupOk, removedPath: verificationDir, classification, reason, metadata };
+}
+
+function fixtureDigestCommand(taskId, appDir, destination) {
+  const paths = sceneFixturePaths(taskId);
+  if (paths.length === 0) return `: > ${shellQuote(destination)}`;
+  const checks = paths.map((path) =>
+    `if [ -f ${shellQuote(path)} ]; then sha256sum ${shellQuote(path)}; else printf 'MISSING  %s\\n' ${shellQuote(path)}; fi`);
+  return `cd ${shellQuote(appDir)} && { ${checks.join("; ")}; } > ${shellQuote(destination)}`;
 }
 
 function walkFiles(root, visit, current = root) {

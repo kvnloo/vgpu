@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -17,7 +18,9 @@ import { executeFreshSource } from "../agent/lib/verify/scene.mjs";
 import { validatePackedArtifacts } from "../agent/lib/scene-auth.mjs";
 import { taskSeedDir, tarballsDir, workDir } from "../agent/lib/paths.ts";
 import { gradeSceneOutput } from "../evals/lib/grade-scene.mjs";
+import { gradeSceneInterop } from "../evals/lib/scene-interop.mjs";
 import { sceneContract, sceneInputSha256 } from "../evals/lib/scene-contracts.mjs";
+import { sceneFixturePaths } from "../evals/lib/scene-contracts.mjs";
 import { sourceKey } from "./pack-vgpu.mjs";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -46,6 +49,21 @@ const CASES = Object.freeze({
     { fault: "missed-publish", rejectChecks: ["warehouse-pixels"], expectedRejectingFrames: [3], requirePassingChecks: ["warehouse-state"] },
     { fault: "index-ids", rejectChecks: ["warehouse-pixels"] },
     { fault: "retain-deleted", rejectChecks: ["warehouse-state", "warehouse-pixels"] },
+  ],
+  "scene-math-interop": [
+    { fault: "positive", rejectChecks: [] },
+    { fault: "reverse-order", stage: 1, rejectChecks: ["interop-pixels"], expectedRejectingFrames: [1, 2, 3, 4], requirePassingChecks: ["interop-state"] },
+    { fault: "double-parent", stage: 1, rejectChecks: ["interop-pixels"], expectedRejectingFrames: [1, 2, 3, 4], requirePassingChecks: ["interop-state"] },
+    { fault: "shear-loss", stage: 1, rejectChecks: ["interop-pixels"], expectedRejectingFrames: [1, 2, 3, 4], requirePassingChecks: ["interop-state"] },
+    { fault: "ortho-no", stage: 1, rejectChecks: ["interop-state", "interop-pixels"], expectedRejectingFrames: [1, 2, 3, 4] },
+    { fault: "stale-camera", stage: 1, rejectChecks: ["interop-pixels"], expectedRejectingFrames: [3], requirePassingChecks: ["interop-state"] },
+    { fault: "descendant-update-omission", stage: 1, rejectChecks: ["interop-pixels"], expectedRejectingFrames: [2, 3], requirePassingChecks: ["interop-state"] },
+    { fault: "missed-publish", stage: 1, rejectChecks: ["interop-pixels"], expectedRejectingFrames: [2, 3], requirePassingChecks: ["interop-state"] },
+    { fault: "turn1-only", stage: 2, rejectChecks: ["source-execution"] },
+    { fault: "key-as-row", stage: 2, rejectChecks: ["interop-state", "interop-pixels"], expectedRejectingFrames: [3, 4] },
+    { fault: "orphan-instances", stage: 2, rejectChecks: ["interop-pixels"], expectedRejectingFrames: [2, 3, 4], requirePassingChecks: ["interop-state"] },
+    { fault: "camera-local", stage: 2, rejectChecks: ["interop-state", "interop-pixels"], expectedRejectingFrames: [2, 3, 4] },
+    { fault: "cached-count", stage: 2, rejectChecks: ["interop-pixels"], expectedRejectingFrames: [4], requirePassingChecks: ["interop-state"] },
   ],
 });
 
@@ -132,14 +150,14 @@ export async function runSceneControls({ taskId, backendName = "host", dockerIma
     const schedule = [
       { control: cases[0], stage: 1 },
       { control: cases[0], stage: 2 },
-      ...cases.slice(1).map((control) => ({ control, stage: 2 })),
+      ...cases.slice(1).map((control) => ({ control, stage: control.stage ?? 2 })),
     ];
     let infrastructureFailure = false;
     let unexpectedResult = false;
     for (const { control, stage } of schedule) {
       const record = await runControlCase({ taskId, stage, control, sourceDir, installDir, runDir, backend });
       summary.cases.push(record);
-      if (record.transport.classification === "infrastructure-error") infrastructureFailure = true;
+      if (record.transport.classification === "infrastructure-error" || record.grade.outcome === "infrastructure-error") infrastructureFailure = true;
       else if (!record.assessment.ok) unexpectedResult = true;
       writeJson(join(runDir, "summary.json"), { ...summary, updatedAt: new Date().toISOString() });
       if (infrastructureFailure) break;
@@ -198,12 +216,13 @@ async function runControlCase({ taskId, stage, control, sourceDir, installDir, r
     if (!parsed.ok) {
       grade = { outcome: "application-failure", checks: [{ name: "output-contract", ok: false, metrics: { reason: parsed.reason } }] };
     } else {
-      const fixtureUnchanged = taskId !== "scene-shader-bindings" ||
-        sha256(readFileSync(join(sourceDir, "integration.wgsl"))) === sha256(readFileSync(join(taskSeedDir(taskId), "integration.wgsl")));
-      grade = await gradeSceneOutput({
+      const fixtureUnchanged = sceneFixturePaths(taskId).every((path) =>
+        sha256(readFileSync(join(sourceDir, path))) === sha256(readFileSync(join(taskSeedDir(taskId), path))));
+      grade = await (taskId === "scene-math-interop" ? gradeSceneInterop : gradeSceneOutput)({
         ...contract,
         result: parsed.value,
         fixtureUnchanged,
+        fixturesUnmodified: fixtureUnchanged,
         readPng: async (path) => {
           const bytes = transport.artifacts?.[path];
           if (!bytes) throw new Error(`${path} is missing from fresh output`);
@@ -233,19 +252,20 @@ async function runControlCase({ taskId, stage, control, sourceDir, installDir, r
 }
 
 function stageControlSource(taskId, destination) {
-  copyFileSync(join(CONTROL_ROOT, "scene-reference.mjs"), join(destination, "render.mjs"));
+  copyFileSync(join(CONTROL_ROOT, taskId === "scene-math-interop" ? "scene-interop-reference.mjs" : "scene-reference.mjs"), join(destination, "render.mjs"));
   copyFileSync(join(CONTROL_ROOT, "scene-reference.wgsl"), join(destination, "scene-reference.wgsl"));
   writeJson(join(destination, "package.json"), { private: true, type: "module" });
   if (taskId === "scene-shader-bindings") {
     copyFileSync(join(taskSeedDir(taskId), "integration.wgsl"), join(destination, "integration.wgsl"));
   }
+  if (taskId === "scene-math-interop") cpSync(join(taskSeedDir(taskId), "ecs"), join(destination, "ecs"), { recursive: true });
 }
 
 async function createHostBackend({ installDir, stagedTarballs }) {
   const npmEnv = { npm_config_cache: join(installDir, ".npm-cache") };
   const install = await runProcess("npm", [
     "install", "--no-audit", "--no-fund", "--loglevel=error",
-    ...stagedTarballs.map((entry) => entry.path), "pngjs",
+    ...stagedTarballs.map((entry) => entry.path), "pngjs", ...(existsSync(join(installDir, "../source/ecs")) ? ["math@0.1.0"] : []),
   ], { cwd: installDir, timeoutMs: 180_000, env: npmEnv });
   if (install.exitCode !== 0 || install.timedOut) throw environmentError(`host dependency install failed: ${install.stderr || install.stdout}`);
   const doctor = await runProcess(join(installDir, "node_modules", ".bin", "vgpu"), ["doctor"], { cwd: installDir, timeoutMs: 60_000 });
@@ -275,7 +295,7 @@ async function createDockerBackend({ installDir, runDir, stagedTarballs, image }
   });
   try {
     const npmEnv = { npm_config_cache: sharedNpmCache };
-    const install = await exec(["npm", "install", "--no-audit", "--no-fund", "--loglevel=error", ...stagedTarballs.map((entry) => entry.path), "pngjs"], { env: npmEnv, timeoutMs: 600_000 });
+    const install = await exec(["npm", "install", "--no-audit", "--no-fund", "--loglevel=error", ...stagedTarballs.map((entry) => entry.path), "pngjs", ...(existsSync(join(installDir, "../source/ecs")) ? ["math@0.1.0"] : [])], { env: npmEnv, timeoutMs: 600_000 });
     if (install.exitCode !== 0 || install.timedOut) {
       throw environmentError(`docker dependency install failed: ${JSON.stringify({ exitCode: install.exitCode, timedOut: install.timedOut, elapsedMs: install.elapsedMs, stderr: install.stderr, stdout: install.stdout })}`);
     }

@@ -25,14 +25,18 @@ import { assertSceneAuth } from "../../agent/lib/scene-auth.mjs";
 import {
   SCENE_CONTRACT_REVISION,
   sceneContract,
+  sceneContractRevision,
+  sceneFixturePaths,
   sceneInputSha256,
 } from "./scene-contracts.mjs";
 import { gradeSceneOutput } from "./grade-scene.mjs";
+import { gradeSceneInterop } from "./scene-interop.mjs";
 import { bashCalls, docsUsage, sourceFiles } from "./transcript.ts";
 import { turnFailure } from "./turn-failure.mjs";
 import { parseSceneExperimentEnv } from "../../scripts/scene-guidance.mjs";
+import { tarballsFingerprint } from "../../scripts/tarballs-fingerprint.mjs";
 
-type SceneTaskId = "scene-robot-arm" | "scene-shader-bindings" | "scene-warehouse";
+type SceneTaskId = "scene-robot-arm" | "scene-shader-bindings" | "scene-warehouse" | "scene-math-interop";
 
 interface Correlation {
   stage: number;
@@ -53,6 +57,9 @@ export function sceneEvalDefinitions(
   env: NodeJS.ProcessEnv = process.env,
 ) {
   const { repetitions } = parseSceneExperimentEnv(env);
+  if (taskId === "scene-math-interop" && parseSceneExperimentEnv(env).variant !== null) {
+    throw new Error("scene-math-interop does not participate in the scene guidance experiment");
+  }
   const definitions = Array.from({ length: repetitions }, (_, index) =>
     defineEval({
       description,
@@ -140,16 +147,24 @@ export async function runSceneEval(
           checks: [{ name: "output-contract", ok: false, metrics: { reason: parsed.reason } }],
         };
       } else {
-        const expectedFixtureHash = taskId === "scene-shader-bindings"
-          ? sha256(readFileSync(join(taskSeedDir(taskId), "integration.wgsl")))
-          : undefined;
-        const observedFixtureHash = readFirstWord(join(verifyDir, "fixture-sha256.txt"));
-        grade = await gradeSceneOutput({
+        const fixturePaths = sceneFixturePaths(taskId);
+        const expectedFixtureHashes = new Map(fixturePaths.map((path) => [
+          path,
+          sha256(readFileSync(join(taskSeedDir(taskId), path))),
+        ]));
+        const observedFixtureHashes = readSceneFixtureHashes(join(verifyDir, "fixture-sha256.txt"));
+        const fixturesUnmodified = fixturePaths.every((path) => expectedFixtureHashes.get(path) === observedFixtureHashes.get(path));
+        grade = await (taskId === "scene-math-interop" ? gradeSceneInterop : gradeSceneOutput)({
           ...contract,
           result: parsed.value,
-          fixtureUnchanged: expectedFixtureHash === undefined || expectedFixtureHash === observedFixtureHash,
+          fixtureUnchanged: fixturesUnmodified,
+          fixturesUnmodified,
           readPng: (path: string) => PNG.sync.read(readFileSync(join(verifyDir, "output", path))),
         });
+        if (grade.outcome === "infrastructure-error") {
+          const verifier = grade.checks.find((check: { name: string }) => check.name === "verifier");
+          throw new Error(`scene verifier infrastructure error: ${String(verifier?.metrics?.reason ?? "invalid fixture or oracle")}`);
+        }
       }
     }
     for (const check of grade.checks) {
@@ -164,6 +179,7 @@ export async function runSceneEval(
       ...coordinates,
       contractRevision: contract.revision,
       status: turn.status,
+      clarificationRequested: turn.inputRequests.length > 0,
       attemptDir,
       complete,
       verdict,
@@ -226,7 +242,7 @@ export function collectSceneRunProvenance(
     ? readTemplateProvenance(env, tarballDirectory, taskId, manifest.sceneGuidance?.docsSha256)
     : null;
   return {
-    contractRevision: SCENE_CONTRACT_REVISION,
+    contractRevision: taskId ? sceneContractRevision(taskId) : SCENE_CONTRACT_REVISION,
     model: env.VGPU_EVALS_MODEL || "anthropic/claude-sonnet-5",
     sourceKey: env.VGPU_EVALS_SOURCE_KEY || manifest.sourceKey || "unavailable",
     seedKey: env.VGPU_EVALS_TASK_SEED_KEY || "unavailable",
@@ -250,6 +266,23 @@ function readTemplateProvenance(
   taskId: SceneTaskId,
   knownDocsSha256?: string,
 ): unknown {
+  if (taskId === "scene-math-interop") {
+    try {
+      const provenance = JSON.parse(readFileSync(join(
+        env.VGPU_EVALS_WORK_DIR || join(dirname(tarballDirectory), ".."),
+        "template-provenance",
+        `${taskId}.json`,
+      ), "utf8")) as { templateKey?: string };
+      const seedKey = env.VGPU_EVALS_TASK_SEED_KEY;
+      const expectedKey = seedKey ? `${tarballsFingerprint(tarballDirectory)}-${taskId}-${seedKey}` : null;
+      if (!expectedKey || provenance.templateKey !== expectedKey) {
+        return { unavailable: true, reason: "stale or uncorrelated interop template provenance" };
+      }
+      return provenance;
+    } catch {
+      return { unavailable: true };
+    }
+  }
   let docsSha256 = knownDocsSha256;
   if (!docsSha256) {
     try {
@@ -314,12 +347,17 @@ function extractTar(tarPath: string, destination: string): void {
 function collectSceneSourceHints(taskId: SceneTaskId, root: string) {
   const files = sourceFiles(root, new Set([".mjs", ".js", ".ts", ".wgsl"]));
   const source = files.map((file) => file.content).join("\n");
+  const seededPaths = new Set(sceneFixturePaths(taskId));
+  const authoredSource = files.filter((file) => !seededPaths.has(file.path)).map((file) => file.content).join("\n");
   return {
     sourceFiles: files.map((file) => file.path),
     semanticReview: "pending lead review; text hints do not establish runtime API or shader use",
     mentionsSceneImport: /["']vgpu\/scene(?:\/gpu)?["']/.test(source),
     mentionsVgpuNodeImport: /["']vgpu\/node["']/.test(source),
-    mentionsMathImport: /["']math["']/.test(source),
+    mentionsMathImport: /["']math["']/.test(authoredSource),
+    seededEcsMentionsMathImport: taskId === "scene-math-interop"
+      ? files.some((file) => file.path.startsWith("ecs/") && /["']math["']/.test(file.content))
+      : null,
     suppliedShaderTextHints: taskId === "scene-shader-bindings" ? {
       mentionsIntegrationWgsl: /integration\.wgsl/.test(source),
       mentionsStyle: /\bstyle\b/.test(source),
@@ -333,9 +371,12 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function readFirstWord(path: string): string | undefined {
-  if (!existsSync(path)) return undefined;
-  return readFileSync(path, "utf8").trim().split(/\s+/)[0];
+export function readSceneFixtureHashes(path: string): Map<string, string> {
+  if (!existsSync(path)) return new Map();
+  return new Map(readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => {
+    const match = line.match(/^([a-f0-9]{64})\s+(?:\.\/)?(.+)$/);
+    return match ? [match[2], match[1]] : ["", ""];
+  }));
 }
 
 function writeJson(path: string, value: unknown): void {

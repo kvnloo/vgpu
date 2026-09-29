@@ -1,17 +1,21 @@
 # Scene evals
 
-Three two-turn tasks that observe whether a coding agent, starting from `npx vgpu`, can build
-headless scene renderers with correct hierarchy transforms, custom-shader bindings, and stable
-object identity. The harness reruns the submitted source on inputs it chooses and grades the
-decoded output on the host.
+Three neutral two-turn tasks that observe whether a coding agent, starting from `npx vgpu`, can
+build headless scene renderers with correct hierarchy transforms, custom-shader bindings, and
+stable object identity. A fourth, explicit task, [`scene-math-interop`](#scene-math-interop),
+asks the agent to render an existing entity system that already owns its matrices. The harness
+reruns the submitted source on inputs it chooses and grades the decoded output on the host.
 
 **It is not a benchmark.** A run is an observation of one agent on one branch. There are no
 scores to compare across branches, no rankings, and no statistical claims. Scene-helper adoption,
 tool choice, batching, and draw counts are recorded as observations and never gate a run.
 
-The contract revision is `scene-evals-v1` (`SCENE_CONTRACT_REVISION` in
-`evals/lib/scene-contracts.mjs`). Any change to case semantics or acceptance thresholds gets a new
-revision, and earlier results stay attached to the revision that produced them.
+Contract revisions are per task. The three neutral tasks use `scene-evals-v1`
+(`SCENE_CONTRACT_REVISION` in `evals/lib/scene-contracts.mjs`); `scene-math-interop` uses its own
+`scene-math-interop-v1`, and `sceneContractRevision(taskId)` returns the right one. Adding the
+interop task did not change any neutral prompt, seed, input, grader, or threshold. Any change to
+case semantics or acceptance thresholds gets a new revision, and earlier results stay attached to
+the revision that produced them.
 
 ## The tasks
 
@@ -21,9 +25,10 @@ revision, and earlier results stay attached to the revision that produced them.
 | `scene-shader-bindings` | Three boxes drawn with the supplied `integration.wgsl` | Absolute camera-position updates | `A, B, A` |
 | `scene-warehouse` | 2,304 boxes, color pass and application-ID pass | Persistent delete/move/recolor by `appId` | four frames |
 
-Each task seed contains only `package.json`, `contract.md`, and — for the shader task —
-`integration.wgsl`. Seeds contain no renderer, no expected matrices or images, no hidden inputs,
-no grader, and no reference-control source.
+Each neutral task seed contains only `package.json`, `contract.md`, and — for the shader task —
+`integration.wgsl`. The interop seed adds an `ecs/` directory; see
+[its section](#scene-math-interop). Seeds contain no renderer, no expected matrices or images, no
+hidden inputs, no grader, and no reference-control source.
 
 The construction prompt names `contract.md`, the `node render.mjs` entry point, and ends with
 ``Use `npx vgpu`.``. Robot and warehouse prompts and seeds name no scene function, import path,
@@ -84,6 +89,7 @@ so run the command above explicitly.
 | `tests/scene-auth.test.mjs` | OIDC guard, rejected API keys, `--skip-pack` consumption and manifest checks |
 | `tests/scene-guidance.test.mjs` | [Docs guidance experiment](#docs-guidance-experiment-opt-in): selector and repetition parsing, pinned model/image, corpus restriction on synthetic and the real `a8a9bc8a`/`929b97f5` manifests, baseline tarball isolation and tamper rejection, lock normalization, unchanged default seeds, per-turn deviation records |
 | `tests/scene-guidance-analysis.test.mjs` | Delivered guide content versus discovery, per-turn exposure, truncation, event deduplication, usage totals, and possible contamination |
+| `tests/scene-interop.test.mjs` | Neutral contracts and seeds still match the frozen hashes in `tests/fixtures/scene-neutral-v1.json`; the interop revision, inputs, and prompts; fixture invariants, and state/pixel gates rejecting isolated faults on synthetic output; native control stages and expected frames; the seed ECS's stable buffers, parent propagation, and generational row reuse; the oracle reproducing the contract example; the ECS agreeing with the oracle over both turn inputs |
 
 Synthetic images validate grader logic only. They are not native controls.
 
@@ -151,9 +157,10 @@ installs, prompts, or grading.
 | `math` | The generated docs manifest from `929b97f5`: adds `/guides/scene-math.docs.md` and the "Scope and external math" content in `/guides/scene-composition.docs.md` |
 
 Any other value (including `BASELINE`) exits with environment code **2** before anything is
-packed or started, and so does setting it for a non-scene task. Contracts, prompts, seeds, graders,
-and thresholds are the `scene-evals-v1` ones in both arms. Experiment runs install `math` and
-default runs do not, so never pool the two.
+packed or started, and so does setting it for a non-scene task. `scene-math-interop` does not
+take part: its eval definition throws when a variant is set, before any case runs. Contracts,
+prompts, seeds, graders, and thresholds are the `scene-evals-v1` ones in both arms. Experiment runs
+install `math` and default neutral-task runs do not, so never pool the two.
 
 ### Launch an arm
 
@@ -513,6 +520,222 @@ The ID pass writes `[id & 255, (id >> 8) & 255, (id >> 16) & 255, 255]` with bac
 App-owned maps, reordered packing, several instance batches, and rebuilt instance streams all
 pass. There is no performance gate and no fixed draw-count gate.
 
+## scene-math-interop
+
+An explicit functional-usability task: can an agent that is told to render an existing entity
+system (ECS) — one that already owns its matrices through `math@0.1.0` — connect those matrices to
+vgpu correctly? It checks that mesh transforms are composed in the right owner, camera uniforms are
+published explicitly, mutation and hierarchy reach the GPU, and the renderer handles lifecycle
+commands introduced in turn 2. The completed pilot has
+[findings](scene-math-interop-findings.md) and [results](scene-math-interop-results.json).
+
+It does **not** measure spontaneous adoption of `math` (the neutral tasks cover that), whether
+guidance helps, or model rankings. The prompt names the dependency and the guide on purpose, so
+this does not measure unaided discovery. Tool-use detours can still be recorded as observations;
+no causal comparison with the earlier neutral or guidance trials is drawn from them.
+
+| Field | Value |
+| --- | --- |
+| Task ID | `scene-math-interop` |
+| Contract revision | `scene-math-interop-v1` |
+| Turns | Two, in one session |
+| Image | 512×384, orthographic camera, WebGPU `[0, 1]` depth |
+| Instructions | The neutral `agent/instructions.md` |
+| Budgets | The same as the neutral tasks: 60 s per rerun, 20 minutes per task run |
+
+Contract, prompts, inputs, and the oracle live in `evals/lib/scene-interop.mjs`, which is the
+authority for every value below.
+
+### Seed
+
+| File | Content |
+| --- | --- |
+| `package.json` | Private module that depends on `math` `0.1.0` |
+| `contract.md` | The executable contract with a full example input and output; no turn-2 schema |
+| `ecs/world.mjs` | The frozen ECS. The agent must leave it byte-identical |
+| `ecs/README.md` | ECS usage only. It names no vgpu API and no rendering approach |
+
+The ECS exposes `createWorld({ capacity = 64 })` with `spawn`, `setPosition`, `setRotation`,
+`setScale`, `setParent` (keeps the local transform), `despawn` (cascades to descendants), `isAlive`,
+`rowOf`, `parentOf`, `renderable`, `camera`, `entities` (live handles in row order), and `update`
+(returns the rows whose world matrix it recomputed). It owns `T·R·S` locals and
+`world = parentWorld · local` in `localMatrices` and `worldMatrices` — `Float32Array`s allocated
+once, row `r` at `[16r, 16r + 16)` — plus a `Uint32Array` `worldVersion`. Handles are generational
+(generation in the upper bits, row in the lower 16), and freed rows are reused, so a later entity
+can occupy a row an earlier one held. Renderable `size`, `offset`, and `color` are never part of a
+matrix.
+
+The seed's dependency installs `math@0.1.0`. For this task, bootstrap checks the installed and
+locked version and the lock's integrity against the pinned `SCENE_EXPERIMENT_MATH_INTEGRITY` in
+every mode, not only in the guidance experiment; a mismatch is an infrastructure error. Seed
+copying includes the `ecs/` subdirectory.
+
+### Prompts
+
+Turn 1 asks for the renderer described in `contract.md`, with the `node render.mjs` entry point.
+It states that the ECS owns every transform and that `ecs/` stays unchanged, and that the
+application uses the installed `math@0.1.0` for numerical operations. It asks the agent to use
+`math` for camera projection and inversion and for mesh-matrix composition while consuming the ECS
+world matrices. It explicitly requests `instances` and `instanceGeometry` with GPU publication,
+allows reading the bundled `/guides/scene-math.docs.md` examples, says every input
+uses only `set` commands, and ends with ``Use `npx vgpu`.``.
+
+Turn 2 discloses the complete new schema — `spawn`, cascading `despawn`, and `parent` (keeps the
+local transform) — with spawn-key allocation, a camera that may gain a parent, and "keep every
+earlier behavior working". Nothing is held back from either turn.
+
+### Fixture
+
+Keys are array positions in `entities`. Quaternions rotate about +Z. Both turns share the same nine
+entities:
+
+| Key | Parent | Role |
+| ---: | --- | --- |
+| 0 | — | Camera at `[0,0,10]`, bounds x −4..4, y −3..3, near 0.1, far 20 |
+| 1 | — | Red box with nonuniform scale `[1.6,0.8,1]` |
+| 2 | 1 | Green child rotated 30°, with a mesh offset; sheared by its parent's scale |
+| 3 | 2 | Blue grandchild rotated −45°, in front of key 2 |
+| 4 | — | Yellow box at z 4, nearest the camera; with `[-1, 1]` depth it and most of the scene are clipped |
+| 5, 6 | — | Overlap pair A (magenta front, cyan back), lower key in front |
+| 7, 8 | — | Overlap pair B (orange back, violet front), lower key behind |
+
+The pairs are drawn in opposite key orders, so any fixed draw order without a depth test fails one
+of them.
+
+| Turn | Frame | Commands |
+| --- | --- | --- |
+| 1 | F0 | None |
+| 1 | F1 | Move and rotate key 1; keys 2 and 3 must follow |
+| 1 | F2 | Scale key 2, so key 3 follows; move the camera |
+| 1 | F3 | Restore every earlier value; the expected output equals F0 |
+| 2 | G0 | None |
+| 2 | G1 | Spawn a camera rig (key 9), parent the camera to it, move and rotate the rig 6°, despawn key 3 |
+| 2 | G2 | Spawn key 10 under key 2 (reuses key 3's row), despawn key 4, rotate the rig −6° |
+| 2 | G3 | Reparent key 5 to the rig, despawn key 1 (cascades to 2 and 10), spawn key 11 into a reused row |
+
+A deterministic test asserts the fixture invariants for every frame before the harness is frozen:
+every silhouette at least 8 px inside the image with at least 400 interior pixels, designed
+overlaps at least 24×24 px with front faces at least 0.5 apart in z, rigid camera worlds, and
+world matrices that keep each front face at constant depth.
+
+### Grading
+
+The oracle in `evals/lib/scene-interop.mjs` is independent of the submission's code: it imports no
+`math` and no ECS, keeps its own entity table keyed by input key, and uses scalar matrix code. It
+allocates spawn keys, cascades despawns, keeps the local transform on reparent, computes
+`world = parentWorld · T·R·S` recursively, inverts the rigid camera by transpose, and projects each
+box's front face through `viewProjection · world · T(offset) · S(size)`. The frontmost silhouette
+wins each pixel. A broken fixture invariant is an infrastructure error.
+
+Every gate is hard, on every turn and every frame. A turn passes only when all pass; a session
+passes only when both turns pass.
+
+| Gate | Passes when | Does not prove |
+| --- | --- | --- |
+| `source-execution` | The fresh copy exits 0 within 60 s | Correctness |
+| `protocol` | Version, `requestId`, frame count, `index` equal to array position; the exact live key set in sorted order; 16 finite numbers per matrix | — |
+| `artifacts` | PNGs are relative files below the output directory and decode at 512×384 | — |
+| `ecs-unmodified` | `ecs/world.mjs` and `ecs/README.md` SHA-256 values from the rerun evidence match the seed | Absence of runtime patching |
+| `interop-state` | Every `world` and `viewProjection` is within `1e-4` of the oracle | That the values came from the ECS or reached the GPU |
+| `interop-pixels` | Per renderable, ≥ 98% of the frontmost interior, eroded by 2 px, matches its RGB within ±2; ≥ 99% of non-black pixels lie inside the union of silhouettes dilated by 2 px | Which library computed the values |
+
+State and pixels are graded separately against the oracle, so correct reported matrices over a
+stale image fail, and so does the reverse. Outcomes stay `pass`, `application-failure`, and
+`infrastructure-error`. `scene-run.json` also records `clarificationRequested` when the agent asks
+a question; the driver sends turn 2 regardless.
+
+### Math-use conformance and ownership
+
+Conformance to the `math` instruction is reviewed separately from the gates and never replaces
+them. After the pilot, a blinded source review with labels removed classifies each final solution:
+external `math` for camera projection, for the camera inverse, and for mesh composition; vgpu
+helpers; handwritten kernels; or none. Calls the seeded ECS makes do not count; the review
+separates them from `math` calls the agent wrote. A numerically correct renderer that ignores the
+instruction has correct output but lacks integration conformance. `mentionsMathImport` and the
+other source hints stay regex observations, and there is no import-regex gate.
+The same review verifies use of the requested instance collection and GPU publication bridge on
+the render path. Correct pixels alone do not establish conformance to those instructions.
+
+This revision has no ownership probe and no runtime call tracing. Whether the renderer draws from
+the ECS's matrices or recomputes them is judged from independent code review plus the executed
+output, and is never reported as runtime attestation.
+
+### Native controls
+
+```bash
+fnm exec --using=24 node apps/agent-evals/scripts/scene-controls.mjs --task scene-math-interop --backend host
+
+export VGPU_EVALS_DOCKER_IMAGE=ghcr.io/vercel/eve@sha256:de79f9a495add7cd1691e3496afc1c3227b0846f9ae0b26126f120c91af3445c
+fnm exec --using=24 node apps/agent-evals/scripts/scene-controls.mjs --task scene-math-interop --backend docker
+```
+
+The reference drives the seed ECS, draws each renderable with `ecsWorld · T(offset) · S(size)`
+using `math`, inverts the camera world, uploads `viewProjection` every frame, publishes every
+frame, and renders with depth. Staging copies `ecs/` beside it, and the host backend installs
+`math@0.1.0`. Every broken control must render valid output; the runner checks that the named gate
+rejects it and that the listed gates still pass.
+
+| Control | Turn | Must reject | Must still pass |
+| --- | --- | --- | --- |
+| Reference | 1, 2 | — | All gates |
+| Reverse mesh order (`T·S·world`) | 1 | Pixels | State |
+| Double parent (`parentWorld · world` for children) | 1 | Pixels | State |
+| Shear loss (decompose and recompose the world) | 1 | Pixels | State |
+| `[-1, 1]` depth instead of `[0, 1]` | 1 | State and pixels | — |
+| Stale camera (projection computed once; state reports it fresh) | 1 | Pixels | State |
+| Descendant update omitted (uploads only rows named by `set`) | 1 | Pixels | State |
+| Missed publish after F0 | 1 | Pixels | State |
+| Turn-1-only renderer (rejects non-`set` commands) | 2 | Source execution | — |
+| Key used as ECS row | 2 | State and pixels | — |
+| Orphan instances (despawn keeps them) | 2 | Pixels | State |
+| Camera from its local transform | 2 | State and pixels | — |
+| Instance count cached from the first frame | 2 | Pixels | State |
+
+The turn-1-only control shows that turn 2 needs real adaptation. Extra positive renderers, a
+no-depth control, and a mesh-size-in-ECS control are not part of this revision. As for the neutral
+tasks, controls validate the protocol, executor, native output, and grader on one environment and
+attest nothing about a submission.
+
+### Running the pilot
+
+The pilot is lead-owned and starts only after the local tests and native controls pass. The lead
+freezes the harness, then runs two fresh sessions serially, two turns each, with
+`anthropic/claude-sonnet-5` through the project OIDC token and the pinned image:
+
+```bash
+fnm exec --using=22 pnpm build
+fnm exec --using=22 node apps/agent-evals/scripts/pack-vgpu.mjs --skip-build
+
+export VGPU_EVALS_MODEL=anthropic/claude-sonnet-5
+export VGPU_EVALS_DOCKER_IMAGE=ghcr.io/vercel/eve@sha256:de79f9a495add7cd1691e3496afc1c3227b0846f9ae0b26126f120c91af3445c
+fnm exec --using=24 node scripts/agent-evals.mjs --task scene-math-interop --skip-pack \
+  --max-concurrency 1 --timeout 1200000 --verbose
+```
+
+`VERCEL_OIDC_TOKEN` must already be in the environment, and the
+[OIDC guard](#model-access-project-oidc-only) applies unchanged. Every attempt is retained, and an
+application failure is never retried. An infrastructure or auth failure is recorded separately and
+may be rerun under a new slot number. Each run records the Eve version, tarball hashes, the `math`
+lock integrity, the seed hash, and each turn's input SHA-256.
+
+Each run reports per-turn gates, the math-use category, carry-forward, clarifications, steps, and
+cost, as counts with no rates or rankings. For carry-forward, the lead reruns each session's
+turn-1 source on the turn-2 input where the control executor supports it cheaply. It is
+diagnostic only and never changes a grade: adaptation is claimed only when that rerun fails and
+turn 2 passes. Without it, the report compares sources and makes no adaptation claim.
+
+### Limitations
+
+- The trust model is non-adversarial. `ecs-unmodified` does not stop runtime patching, and there
+  is no runtime attestation of which code produced a matrix.
+- Two sessions are a pilot. They cannot separate a model effect from API usability, and no rate
+  is generalized from them.
+- Mesa llvmpipe gives functional results only: no hardware-GPU or performance evidence.
+- Rotations are about Z only and the camera is orthographic, chosen for pixel stability. 3D
+  rotations and perspective are not exercised.
+- The prompt names `math` and its guide, so the task says nothing about discovery or spontaneous
+  adoption.
+
 ## How a turn is verified
 
 After every completed turn, the `turn.completed` hook in `agent/hooks/finalize-turn.ts` runs these
@@ -545,7 +768,8 @@ steps in the live sandbox. They all happen before the next agent turn starts:
    outside the temporary tree:
    - the output directory;
    - input, probe and execution records;
-   - a SHA-256 manifest of the copied source, plus the fixture hash for the shader task;
+   - a SHA-256 manifest of the copied source, plus fixture hashes for the shader and interop
+     tasks;
    - `verdict.json`.
 
    After packing, the hook removes the temporary tree and checks that it is gone. It copies

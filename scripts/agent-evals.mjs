@@ -110,6 +110,9 @@ try {
 
 if (!taskId) usage("--task <id> is required.");
 if (!knownTasks().includes(taskId)) usage(`unknown task "${taskId}".`);
+if (taskId === "scene-math-interop" && sceneExperiment.variant !== null) {
+  usage("scene-math-interop does not participate in the scene guidance experiment.");
+}
 if (!isSceneTask(taskId) && (sceneExperiment.variant !== null || sceneExperiment.repetitions !== 1)) {
   usage("VGPU_EVALS_SCENE_GUIDANCE and VGPU_EVALS_SCENE_REPETITIONS apply only to scene evals.");
 }

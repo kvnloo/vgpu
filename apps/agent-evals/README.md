@@ -56,10 +56,15 @@ own build copies the CLI out of it and its `prepack` generates the docs that
 | `scene-robot-arm` | a headless five-part arm renderer, then parent and joint edits | matrices and pixels from a harness rerun of the source on host-chosen poses |
 | `scene-shader-bindings` | three boxes through a supplied WGSL interface, then camera updates | the view-projection binding and image position across an `A, B, A` batch |
 | `scene-warehouse` | 2,304 boxes with a color and an application-ID pass, then delete/move/recolor | state, colors and IDs by stable `appId` across four frames |
+| `scene-math-interop` | integrate a supplied math-based ECS, then add spawning, deletion and reparenting | immutable ECS files, independent matrices and pixels; math-use conformance reviewed separately |
 
-The three `scene-*` tasks share a contract, a rerun verifier and a host grader. They are
+The three neutral scene tasks share a contract, a rerun verifier and a host grader. They are
 documented separately in [scene-evals.md](scene-evals.md); findings from lead-run pilots go in
 [scene-evals-findings.md](scene-evals-findings.md).
+The [explicit math interoperability task](scene-evals.md#scene-math-interop) has its own contract
+revision and requires the installed math package; it does not measure spontaneous adoption.
+Its completed two-session pilot has [findings](scene-math-interop-findings.md) and
+[machine-readable results](scene-math-interop-results.json).
 The completed math-guidance comparison has separate
 [findings](scene-math-evals-findings.md) and [machine-readable results](scene-math-evals-results.json).
 

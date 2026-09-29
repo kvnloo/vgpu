@@ -12,7 +12,7 @@ import {
 import { executeFreshSource, sourceManifest, verifySceneInSandbox } from "../agent/lib/verify/scene.mjs";
 import { sceneContract, sceneInputSha256 } from "../evals/lib/scene-contracts.mjs";
 import { viewProjection } from "../evals/lib/scene-math.mjs";
-import { collectSceneRunProvenance, parseSceneResult, validateSceneAttempt } from "../evals/lib/scene-eval.ts";
+import { collectSceneRunProvenance, parseSceneResult, readSceneFixtureHashes, validateSceneAttempt } from "../evals/lib/scene-eval.ts";
 
 function tempWork() {
   const root = mkdtempSync(join(tmpdir(), "scene-harness-test-"));
@@ -263,6 +263,41 @@ test("sandbox evidence pipelines preserve find failures", async () => {
     assert.match(command, /^bash -o pipefail -c /);
     assert.match(command, /xargs -0 -r sha256sum/);
   }
+});
+
+test("missing supplied fixture records evidence without becoming infrastructure failure", async () => {
+  const files = new Map();
+  const commands = [];
+  const base = fakeSceneSandbox(files, () => null);
+  const sandbox = {
+    ...base,
+    async run(options) {
+      commands.push(options.command);
+      if (options.command.includes("fixture-sha256.txt")) {
+        const match = options.command.match(/> '([^']*fixture-sha256\.txt)'/);
+        if (match) files.set(match[1], "MISSING  integration.wgsl\n");
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      return base.run(options);
+    },
+  };
+  const contract = sceneContract("scene-shader-bindings", 1);
+  const result = await verifySceneInSandbox(sandbox, {
+    taskId: contract.taskId,
+    stage: 1,
+    turnId: "turn-missing-fixture",
+    metaId: "event-missing-fixture",
+    input: contract.input,
+    timeoutMs: 50,
+  });
+  assert.equal(result.classification, "pass");
+  assert.ok(commands.some((command) => command.includes("MISSING")));
+
+  const evidenceRoot = mkdtempSync(join(tmpdir(), "scene-fixture-hash-test-"));
+  const evidence = join(evidenceRoot, "fixture-sha256.txt");
+  writeFileSync(evidence, "MISSING  integration.wgsl\n");
+  assert.equal(readSceneFixtureHashes(evidence).has("integration.wgsl"), false);
+  rmSync(evidenceRoot, { recursive: true, force: true });
 });
 
 test("sandbox transport classifies setup, manifest, and evidence export command failures as infrastructure", async () => {
