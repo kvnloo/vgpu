@@ -74,6 +74,8 @@ if (!Number.isInteger(major) || major < REQUIRED_MAJOR) {
 // One flag drives BOTH the environment variable the sandbox reads and the eval
 // filter, so the two can never disagree about what is running.
 const TASKS_DIR = join(PACKAGE_DIR, "agent", "sandbox", "tasks");
+const VGPU_SKILL_PATH = join(REPO_ROOT, "skills", "vgpu", "SKILL.md");
+const VGPU_SKILL_GENERATOR_PATH = join(REPO_ROOT, "packages", "vgpu", "lib", "docs", "generate", "skill.js");
 
 function knownTasks() {
   try {
@@ -110,8 +112,8 @@ try {
 
 if (!taskId) usage("--task <id> is required.");
 if (!knownTasks().includes(taskId)) usage(`unknown task "${taskId}".`);
-if (taskId === "scene-math-interop" && sceneExperiment.variant !== null) {
-  usage("scene-math-interop does not participate in the scene guidance experiment.");
+if (["scene-math-interop", "scene-quaternion-keyframes"].includes(taskId) && sceneExperiment.variant !== null) {
+  usage(`${taskId} does not participate in the scene guidance experiment.`);
 }
 if (!isSceneTask(taskId) && (sceneExperiment.variant !== null || sceneExperiment.repetitions !== 1)) {
   usage("VGPU_EVALS_SCENE_GUIDANCE and VGPU_EVALS_SCENE_REPETITIONS apply only to scene evals.");
@@ -283,6 +285,23 @@ const hashTree = (dir, prefix = "") => {
   }
 };
 hashTree(join(TASKS_DIR, taskId));
+if (taskId === "scene-quaternion-keyframes") {
+  for (const path of [VGPU_SKILL_PATH, VGPU_SKILL_GENERATOR_PATH]) {
+    if (!existsSync(path)) usage(`scene-quaternion-keyframes requires ${path}.`);
+  }
+  const skillBytes = readFileSync(VGPU_SKILL_PATH);
+  const generatorBytes = readFileSync(VGPU_SKILL_GENERATOR_PATH);
+  const skillSha256 = createHash("sha256").update(skillBytes).digest("hex");
+  const skillBody = skillBytes.toString("utf8").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+  const skillBodySha256 = createHash("sha256").update(skillBody).digest("hex");
+  const generatorSha256 = createHash("sha256").update(generatorBytes).digest("hex");
+  seedHash.update("task-skill/skills/vgpu/SKILL.md");
+  seedHash.update(skillBytes);
+  process.env.VGPU_EVALS_VGPU_SKILL_PATH = VGPU_SKILL_PATH;
+  process.env.VGPU_EVALS_VGPU_SKILL_SHA256 = skillSha256;
+  process.env.VGPU_EVALS_VGPU_SKILL_BODY_SHA256 = skillBodySha256;
+  process.env.VGPU_EVALS_VGPU_SKILL_GENERATOR_SHA256 = generatorSha256;
+}
 process.env.VGPU_EVALS_TASK_SEED_KEY ??= seedHash.digest("hex").slice(0, 16);
 
 // Also precompute the staleness key here, in the real worktree. The runtime

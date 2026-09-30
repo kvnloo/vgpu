@@ -3,8 +3,11 @@
 Three neutral two-turn tasks that observe whether a coding agent, starting from `npx vgpu`, can
 build headless scene renderers with correct hierarchy transforms, custom-shader bindings, and
 stable object identity. A fourth, explicit task, [`scene-math-interop`](#scene-math-interop),
-asks the agent to render an existing entity system that already owns its matrices. The harness
-reruns the submitted source on inputs it chooses and grades the decoded output on the host.
+asks the agent to render an existing entity system that already owns its matrices. A fifth task,
+[`scene-quaternion-keyframes`](#scene-quaternion-keyframes), makes the public
+vgpu skill available and observes which numerical source the agent picks for keyframed rotation.
+The harness reruns the submitted source on inputs it chooses and grades the decoded output on the
+host.
 
 **It is not a benchmark.** A run is an observation of one agent on one branch. There are no
 scores to compare across branches, no rankings, and no statistical claims. Scene-helper adoption,
@@ -12,8 +15,10 @@ tool choice, batching, and draw counts are recorded as observations and never ga
 
 Contract revisions are per task. The three neutral tasks use `scene-evals-v1`
 (`SCENE_CONTRACT_REVISION` in `evals/lib/scene-contracts.mjs`); `scene-math-interop` uses its own
-`scene-math-interop-v1`, and `sceneContractRevision(taskId)` returns the right one. Adding the
-interop task did not change any neutral prompt, seed, input, grader, or threshold. Any change to
+`scene-math-interop-v1`, `scene-quaternion-keyframes` uses `scene-quaternion-keyframes-v1`, and
+`sceneContractRevision(taskId)` returns the right one. Adding the
+interop task did not change any neutral prompt, seed, input, grader, or threshold. Adding the
+quaternion task changed none of them either, nor anything of `scene-math-interop`. Any change to
 case semantics or acceptance thresholds gets a new revision, and earlier results stay attached to
 the revision that produced them.
 
@@ -27,8 +32,9 @@ the revision that produced them.
 
 Each neutral task seed contains only `package.json`, `contract.md`, and — for the shader task —
 `integration.wgsl`. The interop seed adds an `ecs/` directory; see
-[its section](#scene-math-interop). Seeds contain no renderer, no expected matrices or images, no
-hidden inputs, no grader, and no reference-control source.
+[its section](#scene-math-interop). The quaternion seed adds `example-input.json`; see
+[its section](#scene-quaternion-keyframes). Seeds contain no renderer, no expected matrices or
+images, no hidden inputs, no grader, and no reference-control source.
 
 The construction prompt names `contract.md`, the `node render.mjs` entry point, and ends with
 ``Use `npx vgpu`.``. Robot and warehouse prompts and seeds name no scene function, import path,
@@ -90,6 +96,7 @@ so run the command above explicitly.
 | `tests/scene-guidance.test.mjs` | [Docs guidance experiment](#docs-guidance-experiment-opt-in): selector and repetition parsing, pinned model/image, corpus restriction on synthetic and the real `a8a9bc8a`/`929b97f5` manifests, baseline tarball isolation and tamper rejection, lock normalization, unchanged default seeds, per-turn deviation records |
 | `tests/scene-guidance-analysis.test.mjs` | Delivered guide content versus discovery, per-turn exposure, truncation, event deduplication, usage totals, and possible contamination |
 | `tests/scene-interop.test.mjs` | Neutral contracts and seeds still match the frozen hashes in `tests/fixtures/scene-neutral-v1.json`; the interop revision, inputs, and prompts; fixture invariants, and state/pixel gates rejecting isolated faults on synthetic output; native control stages and expected frames; the seed ECS's stable buffers, parent propagation, and generational row reuse; the oracle reproducing the contract example; the ECS agreeing with the oracle over both turn inputs |
+| `tests/scene-keyframes.test.mjs` | The [quaternion task](#scene-quaternion-keyframes): oracle against the contract example and an independent closed form, sign invariance and clamping; frozen fixture hashes and geometric invariants; the grader accepting a synthetic disc rendering; a three-file seed and prompts that name no package, technique, or API; dispatch with every neutral contract and seed hash unchanged; the guidance selector rejected with exit 2 before auth or packing; the skill resolver returning `null` for other task IDs |
 
 Synthetic images validate grader logic only. They are not native controls.
 
@@ -158,7 +165,9 @@ installs, prompts, or grading.
 
 Any other value (including `BASELINE`) exits with environment code **2** before anything is
 packed or started, and so does setting it for a non-scene task. `scene-math-interop` does not
-take part: its eval definition throws when a variant is set, before any case runs. Contracts,
+take part: its eval definition throws when a variant is set, before any case runs.
+`scene-quaternion-keyframes` does not take part either: its eval definition throws the same way,
+and the launcher exits **2** before the OIDC guard or packing. Contracts,
 prompts, seeds, graders, and thresholds are the `scene-evals-v1` ones in both arms. Experiment runs
 install `math` and default neutral-task runs do not, so never pool the two.
 
@@ -735,6 +744,309 @@ turn 2 passes. Without it, the report compares sources and makes no adaptation c
   rotations and perspective are not exercised.
 - The prompt names `math` and its guide, so the task says nothing about discovery or spontaneous
   adoption.
+
+## scene-quaternion-keyframes
+
+The completed pilot has [findings](scene-math-discovery-findings.md) and
+[portable results](scene-math-discovery-results.json). The report separates the two eligible
+sessions from an earlier retained harness bookkeeping failure.
+
+A package-choice task. The agent builds a keyframed-rotation renderer whose
+interpolation vgpu does not provide — vgpu has no quaternion interpolation, and `composeMatrix`
+only normalizes — with the public vgpu skill available. The run observes whether the output is
+correct on each turn, and which numerical source the agent picks: `math`, a library that is
+already installed, another package, or a handwritten kernel.
+
+Correctness is graded independently of that choice. Library choice is an observation: it is never
+a gate, never rewarded, and a correct handwritten or `wgpu-matrix` implementation passes exactly
+like a `math` one. The prompts and seed name no package, technique, or API; the semantic
+requirements (fixed axis, constant angular speed, smaller angle) are all in the contract.
+
+This is one arm with the skill available. It does **not** measure unaided discovery, because the
+skill can route the agent to its answer. It is not an A/B estimate: there is no no-skill arm, so
+no causal skill effect, rate, model ranking, or verdict on package quality can come from it. A
+comparison arm — the same task with the skill withheld and several sessions per arm — needs a new
+lead decision.
+
+| Field | Value |
+| --- | --- |
+| Task ID | `scene-quaternion-keyframes` |
+| Contract revision | `scene-quaternion-keyframes-v1` |
+| Turns | Two, in one session |
+| Image | 512×384, orthographic camera, WebGPU `[0, 1]` depth |
+| Instructions | The neutral `agent/instructions.md`, unchanged |
+| Skill | The generated public `skills/vgpu/SKILL.md`, for this task only |
+| Budgets | The same as the neutral tasks: 60 s per rerun, 20 minutes per task run |
+
+Contract, prompts, inputs, the oracle, and the grader live in `evals/lib/scene-keyframes.mjs`,
+which is the authority for every value below.
+
+### Seed
+
+| File | Content |
+| --- | --- |
+| `package.json` | `{"private":true,"type":"module"}` — no dependencies |
+| `contract.md` | The executable contract, schema and semantics only |
+| `example-input.json` | Two identity keyframes and one frame at `t = 0`; the contract gives its output, `world` equal to identity |
+
+There is no lock file and no source. A test rejects `slerp`, `nlerp`, `lerp`, `math`, `pmndrs`,
+`wgpu-matrix`, `three`, and `glMatrix` anywhere in the seed files and both prompts.
+
+The body is rotation-only at the origin, with three exact-color markers fixed to it: red centered
+at body-local `[2,0,0]`, green at `[0,2,0]`, blue at `[0,0,2]`. Each marker may be a cube with edge
+`0.4` or a sphere with diameter `0.4`. The camera is at `[0,0,10]` with identity orientation,
+orthographic bounds x −4..4 and y −3..3, near 0.1, far 20. Each output frame reports `world`, the
+body's column-major 4×4 rotation with zero translation. Because `world` is a rotation matrix, `q`
+and `−q` produce identical output.
+
+### Prompts
+
+Turn 1, with the neutral ending:
+
+```text
+Build the headless keyframed-rotation renderer described in contract.md.
+Its entry point must be `node render.mjs <input.json> <output-directory>`.
+Use `npx vgpu`.
+```
+
+Turn 2 discloses one change, endpoint clamping:
+
+```text
+The animation now needs frame times before the first keyframe and after the last one. Update the renderer so those frames hold the first or last keyframe's orientation.
+Everything else in contract.md still applies.
+```
+
+Sign handling is not hinted in turn 2. The turn-1 contract already requires it: a quaternion and
+its negation denote the same orientation, and every segment takes the smaller angle. The turn-2
+input varies only documented inputs.
+
+The prompt keeps the neutral ``Use `npx vgpu`.`` wording. When the agent loads the skill, the
+skill's own no-install instructions for finding the local version apply. Which command form the
+agent runs is recorded as an observation.
+
+### Fixture
+
+| Turn | Keyframe times | Frame times |
+| --- | --- | --- |
+| 1 | `0, 1, 2.5, 3` | `0, 0.22, 0.75, 1, 1.35, 2.1, 2.5, 2.8, 3` |
+| 2 | `0, 1, 2.5, 3, 4` | `-0.5, 0, 0.75, 1.35, 2.1, 2.8, 3, 3.3, 3.7, 4, 4.6` |
+
+The keys are noncommuting 3D orientations; segment angles are 165°, 125°, 60°, and, in turn 2, a
+new segment of about 40° to the key at `t = 4`. Turn 1 stores every key with a positive dot product
+to its predecessor, so it does not exercise sign handling. Turn 2 keeps the same orientations but
+stores the key at `t = 2.5` and the new key with the opposite sign, so three of its four segments
+have a negative stored dot product, and it adds frames outside the key range. The turn-1 frames that
+recur in turn 2 act as a regression.
+
+A deterministic test freezes both inputs by SHA-256 (`c24f904a…` for turn 1, `8793962f…` for
+turn 2) and asserts these invariants on every frame: unit keys within `1e-12`, every segment at
+most 170°, projected marker centers at least `√3·0.4·64 + 8 ≈ 52.3` px apart (68.6 px measured), and
+every center at least 40 px inside the image (68.0 px measured).
+
+### Grading
+
+The oracle in `evals/lib/scene-keyframes.mjs` is scalar code that never enters the sandbox and
+imports no `math` and no `wgpu-matrix`. It clamps `t` to the key range, finds the segment, negates
+the second key when the dot product is negative, interpolates at constant angular speed
+(`a·sin((1−u)θ)/sinθ + b·sin(uθ)/sinθ`), normalizes, and builds the column-major rotation matrix. A
+test checks it against the closed form `a ⊗ exp(u·log(a⁻¹b))` within `1e-12`.
+
+Every gate is hard, on every turn and every frame. A turn passes only when all pass.
+
+| Gate | Passes when | Does not prove |
+| --- | --- | --- |
+| `source-execution` | The fresh copy exits 0 within 60 s and writes `result.json`, after the native health probe passed | Correctness, or that the source is idiomatic |
+| `protocol` | `version`, `requestId`, frame count, `index` equal to array position, a relative `color` path below the output directory, and 16 finite numbers in `world` | That the values are correct |
+| `artifacts` | Every PNG decodes at 512×384 with a full RGBA buffer | What the images show |
+| `state` | Every `world` value is within `1e-4` of the oracle | That the image was rendered from that state |
+| `pixels` | Per frame, see below | Exact interpolation, marker shape, or GPU provenance |
+
+Per frame, the pixel gate classifies pixels by exact marker RGB within ±2. For each color, the blob
+centroid must lie within 3 px of the oracle's projected center, and its area must be 328–1,311 px.
+At least 99% of the non-black pixels must lie within 25.2 px (`√3·0.2·64 + 3`) of one of the three
+expected centers, and a frame with no non-black pixels fails. Under the orthographic camera, the
+centroid of any centrally symmetric marker is its projected center, so cubes and spheres both pass;
+no gate inspects shape or tessellation.
+
+The pixel gate is a centroid, area, and containment check, not exact shape validation. It shows that
+each marker appears in the right place at a plausible size. A normalized linear blend moves markers
+by at most about 14 px on these fixtures, so the state gate catches interpolation faults and the
+pixel gate catches render and publish faults. A passing health probe plus source execution does not
+attest that the GPU produced the pixels; see [Trust model and limits](#trust-model-and-limits).
+
+Outcomes stay `pass`, `application-failure`, and `infrastructure-error`, as for the other tasks.
+
+### Initial dependency state
+
+`math` must be absent before the first turn — from `node_modules`, from every `package-lock.json`
+entry including nested ones, from every `package.json` dependency field, and from `npm ls math
+--all`. Bootstrap installs no experiment dependencies for this task: only the vgpu tarballs and
+`pngjs`, as for the other scene tasks. A failed absence check is an infrastructure error that blocks
+the run, never an agent failure.
+
+Absence evidence fails closed. Bootstrap must read and parse an object from `package.json`, an
+object with a `packages` map from `package-lock.json`, and an object from the `npm ls` JSON output;
+a missing or malformed read cannot prove absence. The accepted bootstrap snapshot is written at
+`initialDependencySnapshot`. It records the manifest, lock, and dependency-tree SHA-256 values and
+parse errors, every declared or locked `math` location, and the observed `math`, `wgpu-matrix`, and
+`three` package versions. The same schema is captured after each turn at
+`turns[].dependencySnapshot`.
+
+Eve can build a cold template lazily during the first `t.send`. Each saved turn rereads the
+bootstrap receipt and validates its template/seed identity before copying the initial snapshot;
+capturing it when the eval function first starts can incorrectly record `null`.
+
+`wgpu-matrix`, which has a shortest-arc quaternion interpolation, stays installed as a direct
+runtime dependency of vgpu. It is importable without any install and is not removed to steer the
+agent. Using it is a correct alternative, and results report it separately from `math`.
+
+After bootstrap the agent may install anything. Install attempts and their exit codes are recorded
+separately from the dependency state that results, per turn.
+
+### Skill delivery
+
+`agent/skills/vgpu.ts` is an Eve dynamic skill resolved on `session.started`. It returns the public
+skill only when `VGPU_EVALS_TASK` is `scene-quaternion-keyframes` and `null` for every other task,
+so no other task advertises a new skill. The launcher reads the generated `skills/vgpu/SKILL.md`,
+exits **2** if it or the skill generator source is missing, and passes the path and both SHA-256
+values to the runtime. The resolver rereads the file and throws on a hash mismatch, so a stale or
+task-specific copy cannot be served. The skill's bytes enter this task's seed hash only, so a skill
+change rebuilds this task's template and no other.
+
+Only `SKILL.md` is delivered; the skill's `blender/` resources are not, and this task does not need
+them. The generic agent instructions and the prompts are unchanged. Before the pilot, Eve's mock
+model receives a no-resolver baseline and null-resolver captures for the other tasks; their
+model-visible system prompts and framework tool lists must be identical.
+
+"Advertised" and "loaded" are recorded separately. Advertisement requires exact out-of-workspace
+materialization evidence from the sandbox. Eve removes SKILL.md frontmatter before returning
+`load_skill`, so the frozen full-markdown
+hash and expected delivered-body hash are different. Loaded requires a completed
+`load_skill("vgpu")` whose actual string result has exactly the expected body hash; a missing output,
+failed call, wrong skill name, full-markdown result, or mutated body is not successful. A session
+that only advertised the skill is reported as "advertised, not loaded", never as having read it.
+
+Advertisement is observed rather than inferred from launcher configuration. At turn completion,
+the hook resolves the sandbox `$HOME`, reads `$HOME/.agents/skills/vgpu/SKILL.md`, and records its
+path, existence, full hash, and whether it is outside `/workspace`. `advertised` is true only when
+that file exists outside the graded workspace and its full hash exactly matches the frozen skill.
+A missing file, one-byte mutation, or Eve's `/workspace/skills/` fallback records
+`integrity: "infrastructure-error"` and cannot be reported as advertised.
+
+The pre-pilot skill-isolation check uses Eve 0.29.5's dynamic-skill lifecycle, `mockModel`, an
+in-memory `SandboxSession`, and Eve's actual `load_skill` implementation. It verifies byte-identical
+model-visible prompts and tools for `scene-robot-arm`, `scene-math-interop`, and `s2-gradient`, then
+loads the target skill and rejects a mutated body. For the frozen package Git
+`b6ec97a379e238cb37f492e30a73cdcad03e908d`, the advertised full-markdown hash is
+`31011aa5d7e62408cc21619de2af0dee2062b75646df398dc3bbf3bdae22b51c` and the delivered body hash is
+`285789ace4fd0f82333c5a6d471a76f73d7ccbc907e00bb7f5d2448e48ec50e3`. Evidence is in
+`.work/skill-isolation/2026-09-30T18-34-36-088Z-c95ef7d0-e928-4cd6-bf37-939e76d6c61e/summary.json`.
+This isolation check exercises Eve internals directly; it does not prove real-wrapper skill
+discovery or Docker environment propagation. No separate zero-cost real-wrapper Docker discovery
+check is implemented. The first paid turn therefore supplies the production-path materialization
+evidence, and the lead-owned runner must stop and exclude the session from behavioral claims when
+advertisement integrity is not `pass`.
+
+`scene-run.json` exposes the provenance at these concrete paths:
+
+| Path | Meaning |
+| --- | --- |
+| `skillDelivery.expectedAdvertisedFullMarkdownSha256` | Frozen full generated `SKILL.md` hash supplied by the launcher |
+| `skillDelivery.advertisedFullMarkdownSha256` | Observed full hash, populated only when exact out-of-workspace materialization proves advertisement |
+| `skillDelivery.observedAdvertisedFullMarkdownSha256` | Observed full hash even when it is mismatched |
+| `skillDelivery.materializedPath`, `skillDelivery.materializedPresent` | Actual sandbox materialization path and existence |
+| `skillDelivery.materializedSha256`, `skillDelivery.materializedOutsideWorkspace` | Actual full hash and isolation from the graded workspace |
+| `skillDelivery.advertisementIntegrity`, `skillDelivery.advertisementError` | `pass` or `infrastructure-error`, with the concrete failure |
+| `skillDelivery.expectedLoadedBodySha256` | Expected `load_skill` result after Eve removes frontmatter |
+| `skillDelivery.generatorSha256` | Skill generator source identity |
+| `skillDelivery.packageGitHead` | Git revision used by the packed vgpu packages |
+| `skillDelivery.workspaceGitHead`, `skillDelivery.workspaceDirty` | App/harness checkout identity; the dirty flag is expected before the lead-owned commit |
+| `skillDelivery.harnessAggregateSha256`, `skillDelivery.harnessFiles[]` | Aggregate and per-file identities for the uncommitted harness |
+| `initialDependencySnapshot` | Fail-closed dependency evidence after bootstrap and before turn 1 |
+| `turns[].dependencySnapshot` | Dependency evidence after that turn |
+| `turns[].complete.skillAdvertisementSnapshot` | Hook receipt with checked paths and materialization evidence |
+| `turns[].skill.advertisedFullMarkdownSha256` | Exact observed advertised hash, or `null` when integrity failed |
+| `turns[].skill.materializedPath`, `materializedPresent`, `materializedSha256`, `materializedOutsideWorkspace` | Per-turn copy of the observed sandbox evidence |
+| `turns[].skill.advertisementIntegrity`, `advertisementError` | Per-turn production-path integrity result |
+| `turns[].skill.expectedLoadedBodySha256` | Expected delivered body identity copied into the turn |
+| `turns[].skill.loadCalls[]` | Every `load_skill` call, status, observed body hash, expected-hash match, and success |
+| `turns[].skill.loaded` | Whether any call completed for `vgpu` with the exact expected body hash |
+
+### Observations
+
+Recorded per turn, never a gate and never part of the outcome:
+
+- skill: advertised, loaded, and its identity (delivered SHA-256, generator SHA-256);
+- docs exposure: `vgpu docs` calls, whether the scene-math guide surfaced or was opened, and any
+  filesystem `/guides` searches;
+- installs: commands, exit codes, per-turn `package.json` and lock changes, and the installed
+  `math` version;
+- the command form used to run the vgpu CLI;
+- authored imports, as regex source hints only;
+- clarifications, steps, tokens, and cost.
+
+After each completed pilot session, a blinded source review classifies each turn's interpolation
+source as `math`, `wgpu-matrix`, `three`, another library, or handwritten, and checks whether a
+handwritten kernel is correct. An import alone is not evidence that the package executed.
+
+### Running the pilot
+
+The pilot is lead-owned. It starts only after the local tests pass, the
+native controls pass, and an independent review of the implementation is complete. Correct
+alternative controls — a handwritten kernel, `math`, `wgpu-matrix`, and sphere markers — must pass,
+and broken interpolation, sign, clamping, and render controls must fail their intended gate while
+still producing valid output.
+
+The final pre-pilot Docker control command used the pinned image and package source key
+`6122d243c06747f2`:
+
+```bash
+VGPU_EVALS_DOCKER_IMAGE='ghcr.io/vercel/eve@sha256:de79f9a495add7cd1691e3496afc1c3227b0846f9ae0b26126f120c91af3445c' \
+  fnm exec --using=24 node apps/agent-evals/scripts/scene-controls.mjs \
+  --task scene-quaternion-keyframes --backend docker
+```
+
+All 28 scheduled stage/case pairs passed their assessments. The four correct implementations
+passed both turns; every broken control rendered successfully and failed its intended state or
+pixel gate, while the turn-1 `long-arc` and `no-clamp` diagnostic passes remained expected.
+Evidence is in
+`.work/scene-controls/2026-09-30T18-32-49.955Z-fd59a30c/scene-quaternion-keyframes/summary.json`.
+
+The lead freezes the harness, the skill, and the packages, then runs two fresh sessions serially,
+two turns each, with `anthropic/claude-sonnet-5` through the project OIDC token and the pinned
+image:
+
+```bash
+fnm exec --using=22 pnpm build
+fnm exec --using=22 node apps/agent-evals/scripts/pack-vgpu.mjs --skip-build
+
+export VGPU_EVALS_MODEL=anthropic/claude-sonnet-5
+export VGPU_EVALS_DOCKER_IMAGE=ghcr.io/vercel/eve@sha256:de79f9a495add7cd1691e3496afc1c3227b0846f9ae0b26126f120c91af3445c
+fnm exec --using=24 node scripts/agent-evals.mjs --task scene-quaternion-keyframes --skip-pack \
+  --max-concurrency 1 --timeout 1200000 --verbose
+```
+
+The [OIDC guard](#model-access-project-oidc-only) applies unchanged. Every attempt is retained, and
+an application failure is never retried. An infrastructure or auth failure is recorded separately
+and may be rerun, labeled, under a new slot number.
+
+Two sessions support per-session observations only: whether the skill was loaded, whether the
+guide was reached, which interpolation source was chosen, whether each turn's output was correct,
+and cost. They support no rates and no confidence intervals. A carry-forward rerun of turn-1 source
+on the turn-2 input is optional; without it the report makes no measured-adaptation claim.
+
+### Limitations
+
+- Skill availability and actual loading are reported separately; availability alone does not
+  establish that the agent used the guidance.
+- `wgpu-matrix` is importable without an install; its use is a legitimate alternative, reported
+  separately.
+- The pixel gate is centroid, area, and containment only. A normalized linear blend is caught
+  mainly by the state gate.
+- One rotating body tests orientation interpolation only, not general scene composition.
+- Turn 1 does not exercise sign handling on purpose. A solution without sign alignment passes
+  turn 1 while violating its contract; turn 2 detects it.
+- Mesa llvmpipe gives functional results only: no hardware-GPU or performance evidence.
 
 ## How a turn is verified
 

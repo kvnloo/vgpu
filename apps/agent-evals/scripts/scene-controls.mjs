@@ -19,6 +19,7 @@ import { validatePackedArtifacts } from "../agent/lib/scene-auth.mjs";
 import { taskSeedDir, tarballsDir, workDir } from "../agent/lib/paths.ts";
 import { gradeSceneOutput } from "../evals/lib/grade-scene.mjs";
 import { gradeSceneInterop } from "../evals/lib/scene-interop.mjs";
+import { gradeSceneKeyframes } from "../evals/lib/scene-keyframes.mjs";
 import { sceneContract, sceneInputSha256 } from "../evals/lib/scene-contracts.mjs";
 import { sceneFixturePaths } from "../evals/lib/scene-contracts.mjs";
 import { sourceKey } from "./pack-vgpu.mjs";
@@ -65,6 +66,36 @@ const CASES = Object.freeze({
     { fault: "camera-local", stage: 2, rejectChecks: ["interop-state", "interop-pixels"], expectedRejectingFrames: [2, 3, 4] },
     { fault: "cached-count", stage: 2, rejectChecks: ["interop-pixels"], expectedRejectingFrames: [4], requirePassingChecks: ["interop-state"] },
   ],
+  "scene-quaternion-keyframes": [
+    { fault: "handwritten", positive: true, stages: [1, 2], rejectChecks: [] },
+    { fault: "math", positive: true, stages: [1, 2], rejectChecks: [] },
+    { fault: "wgpu-matrix", positive: true, stages: [1, 2], rejectChecks: [] },
+    { fault: "sphere", positive: true, stages: [1, 2], rejectChecks: [] },
+    { fault: "nlerp", stages: [1, 2], rejectChecks: ["state"] },
+    { fault: "euler-xyz-lerp", stages: [1, 2], rejectChecks: ["state", "pixels"] },
+    { fault: "index-uniform-time", stages: [1, 2], rejectChecks: ["state"] },
+    { fault: "transposed-world", stages: [1, 2], rejectChecks: ["state"] },
+    { fault: "wxyz-misread", stages: [1, 2], rejectChecks: ["state"] },
+    {
+      fault: "long-arc",
+      stages: [1, 2],
+      stageExpectations: {
+        1: { expectPass: true, rejectChecks: [] },
+        2: { rejectChecks: ["state", "pixels"], expectedRejectingFrames: [4, 5, 6, 8, 9] },
+      },
+    },
+    {
+      fault: "no-clamp",
+      stages: [1, 2],
+      stageExpectations: {
+        1: { expectPass: true, rejectChecks: [] },
+        2: { rejectChecks: ["state", "pixels"], expectedRejectingFrames: [1, 11] },
+      },
+    },
+    { fault: "stale-publish", stages: [1, 2], rejectChecks: ["pixels"], requirePassingChecks: ["state"] },
+    { fault: "frame0-png-reuse", stages: [1, 2], rejectChecks: ["pixels"], requirePassingChecks: ["state"] },
+    { fault: "swap-red-green", stages: [1, 2], rejectChecks: ["pixels"], requirePassingChecks: ["state"] },
+  ],
 });
 
 export function controlCases(taskId) {
@@ -74,7 +105,7 @@ export function controlCases(taskId) {
 }
 
 export function assessControlCase(control, grade) {
-  if (control.fault === "positive") {
+  if (control.positive || control.expectPass || control.fault === "positive") {
     return grade?.outcome === "pass"
       ? { ok: true }
       : { ok: false, reason: `positive control graded ${grade?.outcome ?? "without an outcome"}` };
@@ -141,17 +172,22 @@ export async function runSceneControls({ taskId, backendName = "host", dockerIma
   let backend;
   try {
     backend = backendName === "host"
-      ? await createHostBackend({ installDir, stagedTarballs })
-      : await createDockerBackend({ installDir, runDir, stagedTarballs, image: dockerImage });
+      ? await createHostBackend({ taskId, installDir, stagedTarballs })
+      : await createDockerBackend({ taskId, installDir, runDir, stagedTarballs, image: dockerImage });
     summary.environment = backend.environment;
     writeJson(join(runDir, "environment.json"), backend.environment);
     writeJson(join(runDir, "summary.json"), summary);
 
-    const schedule = [
-      { control: cases[0], stage: 1 },
-      { control: cases[0], stage: 2 },
-      ...cases.slice(1).map((control) => ({ control, stage: control.stage ?? 2 })),
-    ];
+    const schedule = cases.flatMap((control, index) => {
+      const stages = control.stages ?? (index === 0 ? [1, 2] : [control.stage ?? 2]);
+      return stages.map((stage) => ({
+        control: {
+          ...control,
+          ...(control.stageExpectations?.[stage] ?? {}),
+        },
+        stage,
+      }));
+    });
     let infrastructureFailure = false;
     let unexpectedResult = false;
     for (const { control, stage } of schedule) {
@@ -218,7 +254,12 @@ async function runControlCase({ taskId, stage, control, sourceDir, installDir, r
     } else {
       const fixtureUnchanged = sceneFixturePaths(taskId).every((path) =>
         sha256(readFileSync(join(sourceDir, path))) === sha256(readFileSync(join(taskSeedDir(taskId), path))));
-      grade = await (taskId === "scene-math-interop" ? gradeSceneInterop : gradeSceneOutput)({
+      const gradeControl = taskId === "scene-math-interop"
+        ? gradeSceneInterop
+        : taskId === "scene-quaternion-keyframes"
+          ? gradeSceneKeyframes
+          : gradeSceneOutput;
+      grade = await gradeControl({
         ...contract,
         result: parsed.value,
         fixtureUnchanged,
@@ -252,8 +293,16 @@ async function runControlCase({ taskId, stage, control, sourceDir, installDir, r
 }
 
 function stageControlSource(taskId, destination) {
-  copyFileSync(join(CONTROL_ROOT, taskId === "scene-math-interop" ? "scene-interop-reference.mjs" : "scene-reference.mjs"), join(destination, "render.mjs"));
+  const reference = taskId === "scene-math-interop"
+    ? "scene-interop-reference.mjs"
+    : taskId === "scene-quaternion-keyframes"
+      ? "scene-keyframes-reference.mjs"
+      : "scene-reference.mjs";
+  copyFileSync(join(CONTROL_ROOT, reference), join(destination, "render.mjs"));
   copyFileSync(join(CONTROL_ROOT, "scene-reference.wgsl"), join(destination, "scene-reference.wgsl"));
+  if (taskId === "scene-quaternion-keyframes") {
+    copyFileSync(join(CONTROL_ROOT, "scene-keyframes-sphere.wgsl"), join(destination, "scene-keyframes-sphere.wgsl"));
+  }
   writeJson(join(destination, "package.json"), { private: true, type: "module" });
   if (taskId === "scene-shader-bindings") {
     copyFileSync(join(taskSeedDir(taskId), "integration.wgsl"), join(destination, "integration.wgsl"));
@@ -261,11 +310,11 @@ function stageControlSource(taskId, destination) {
   if (taskId === "scene-math-interop") cpSync(join(taskSeedDir(taskId), "ecs"), join(destination, "ecs"), { recursive: true });
 }
 
-async function createHostBackend({ installDir, stagedTarballs }) {
+async function createHostBackend({ taskId, installDir, stagedTarballs }) {
   const npmEnv = { npm_config_cache: join(installDir, ".npm-cache") };
   const install = await runProcess("npm", [
     "install", "--no-audit", "--no-fund", "--loglevel=error",
-    ...stagedTarballs.map((entry) => entry.path), "pngjs", ...(existsSync(join(installDir, "../source/ecs")) ? ["math@0.1.0"] : []),
+    ...stagedTarballs.map((entry) => entry.path), "pngjs", ...controlInstallSpecs(taskId),
   ], { cwd: installDir, timeoutMs: 180_000, env: npmEnv });
   if (install.exitCode !== 0 || install.timedOut) throw environmentError(`host dependency install failed: ${install.stderr || install.stdout}`);
   const doctor = await runProcess(join(installDir, "node_modules", ".bin", "vgpu"), ["doctor"], { cwd: installDir, timeoutMs: 60_000 });
@@ -276,7 +325,7 @@ async function createHostBackend({ installDir, stagedTarballs }) {
   };
 }
 
-async function createDockerBackend({ installDir, runDir, stagedTarballs, image }) {
+async function createDockerBackend({ taskId, installDir, runDir, stagedTarballs, image }) {
   const name = `vgpu-scene-${randomUUID().slice(0, 12)}`;
   const controlsRoot = join(workDir(), "scene-controls");
   const sharedNpmCache = join(controlsRoot, ".npm-cache-docker");
@@ -295,7 +344,7 @@ async function createDockerBackend({ installDir, runDir, stagedTarballs, image }
   });
   try {
     const npmEnv = { npm_config_cache: sharedNpmCache };
-    const install = await exec(["npm", "install", "--no-audit", "--no-fund", "--loglevel=error", ...stagedTarballs.map((entry) => entry.path), "pngjs", ...(existsSync(join(installDir, "../source/ecs")) ? ["math@0.1.0"] : [])], { env: npmEnv, timeoutMs: 600_000 });
+    const install = await exec(["npm", "install", "--no-audit", "--no-fund", "--loglevel=error", ...stagedTarballs.map((entry) => entry.path), "pngjs", ...controlInstallSpecs(taskId)], { env: npmEnv, timeoutMs: 600_000 });
     if (install.exitCode !== 0 || install.timedOut) {
       throw environmentError(`docker dependency install failed: ${JSON.stringify({ exitCode: install.exitCode, timedOut: install.timedOut, elapsedMs: install.elapsedMs, stderr: install.stderr, stdout: install.stdout })}`);
     }
@@ -321,6 +370,12 @@ async function createDockerBackend({ installDir, runDir, stagedTarballs, image }
     await runProcess("docker", ["rm", "-f", name], { cwd: runDir, timeoutMs: 30_000 });
     throw error;
   }
+}
+
+function controlInstallSpecs(taskId) {
+  return taskId === "scene-math-interop" || taskId === "scene-quaternion-keyframes"
+    ? ["math@0.1.0"]
+    : [];
 }
 
 async function nativeHealthProbe(backend, appDir) {

@@ -18,6 +18,8 @@ agent/sandbox/          boots a sandbox, installs those tarballs, gates on `vgpu
 agent/sandbox/tasks/    one seed project per task, copied into /workspace by bootstrap
 agent/                  a neutral coding agent (eve defaults: bash, read/write, glob, grep)
                         plus one generic `view-image` tool (see "The view-image tool")
+agent/skills/           task-scoped dynamic skills: the public vgpu skill resolves for
+                        scene-quaternion-keyframes only, null for every other task
 agent/hooks/            after every turn: run the task's verification, then tar /workspace
                         back to .work/snapshots/<sessionId>/ (scene tasks: archive first,
                         then rerun, under .work/snapshots/<sessionId>/turns/<turnId>/<eventId>/)
@@ -57,6 +59,7 @@ own build copies the CLI out of it and its `prepack` generates the docs that
 | `scene-shader-bindings` | three boxes through a supplied WGSL interface, then camera updates | the view-projection binding and image position across an `A, B, A` batch |
 | `scene-warehouse` | 2,304 boxes with a color and an application-ID pass, then delete/move/recolor | state, colors and IDs by stable `appId` across four frames |
 | `scene-math-interop` | integrate a supplied math-based ECS, then add spawning, deletion and reparenting | immutable ECS files, independent matrices and pixels; math-use conformance reviewed separately |
+| `scene-quaternion-keyframes` | a keyframed-rotation renderer with the public vgpu skill available, then endpoint clamping | independent rotation matrices and marker pixels; numerical-source choice observed, never graded |
 
 The three neutral scene tasks share a contract, a rerun verifier and a host grader. They are
 documented separately in [scene-evals.md](scene-evals.md); findings from lead-run pilots go in
@@ -67,6 +70,12 @@ Its completed two-session pilot has [findings](scene-math-interop-findings.md) a
 [machine-readable results](scene-math-interop-results.json).
 The completed math-guidance comparison has separate
 [findings](scene-math-evals-findings.md) and [machine-readable results](scene-math-evals-results.json).
+The [quaternion task](scene-evals.md#scene-quaternion-keyframes) is the only task
+that receives the public vgpu skill. It observes which numerical source the agent picks, grades
+correctness independently, and is neither unaided discovery nor an A/B estimate. Its completed
+two-session pilot has [findings](scene-math-discovery-findings.md) and
+[machine-readable results](scene-math-discovery-results.json), including the separately retained
+infrastructure attempt.
 
 ### s2-gradient
 

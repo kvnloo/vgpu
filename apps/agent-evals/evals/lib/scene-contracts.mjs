@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import { sceneInteropContract, sceneInteropRevision, validateSceneInteropResult } from "./scene-interop.mjs";
+import {
+  SCENE_KEYFRAMES_TASK_ID,
+  SCENE_KEYFRAMES_REVISION,
+  sceneKeyframesContract,
+  validateSceneKeyframesResult,
+} from "./scene-keyframes.mjs";
 
 export const SCENE_CONTRACT_REVISION = "scene-evals-v1";
 export const SCENE_TASK_IDS = Object.freeze([
@@ -7,6 +13,7 @@ export const SCENE_TASK_IDS = Object.freeze([
   "scene-shader-bindings",
   "scene-warehouse",
   "scene-math-interop",
+  SCENE_KEYFRAMES_TASK_ID,
 ]);
 
 const A = Object.freeze({
@@ -98,6 +105,7 @@ const PROMPTS = Object.freeze({
 export function sceneContract(taskId, stage) {
   requireSceneTask(taskId);
   if (stage !== 1 && stage !== 2) throw new TypeError(`scene stage must be 1 or 2, got ${stage}`);
+  if (taskId === SCENE_KEYFRAMES_TASK_ID) return sceneKeyframesContract(stage);
   if (taskId === "scene-math-interop") return sceneInteropContract(stage);
   const requestId = `${taskId}-turn-${stage}`;
   let width;
@@ -139,11 +147,13 @@ export function sceneContract(taskId, stage) {
 
 export function sceneContractRevision(taskId) {
   requireSceneTask(taskId);
+  if (taskId === SCENE_KEYFRAMES_TASK_ID) return SCENE_KEYFRAMES_REVISION;
   return taskId === "scene-math-interop" ? sceneInteropRevision() : SCENE_CONTRACT_REVISION;
 }
 
 export function sceneFixturePaths(taskId) {
   requireSceneTask(taskId);
+  if (taskId === SCENE_KEYFRAMES_TASK_ID) return [];
   if (taskId === "scene-shader-bindings") return ["integration.wgsl"];
   if (taskId === "scene-math-interop") return ["ecs/README.md", "ecs/world.mjs"];
   return [];
@@ -158,6 +168,7 @@ export function requireSceneTask(taskId) {
 
 export function validateSceneResult(taskId, input, result) {
   requireSceneTask(taskId);
+  if (taskId === SCENE_KEYFRAMES_TASK_ID) return validateSceneKeyframesResult(input, result);
   if (taskId === "scene-math-interop") return validateSceneInteropResult(input, result);
   const errors = [];
   if (!result || typeof result !== "object" || Array.isArray(result)) errors.push("result must be an object");

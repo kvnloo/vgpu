@@ -14,6 +14,7 @@ import {
 import { isSceneTask } from "../lib/scene-auth.mjs";
 import { observeSceneGuidanceInstall } from "../lib/scene-guidance.ts";
 import { requireTaskId } from "../lib/task.ts";
+import { observeSceneKeyframeDependencies } from "../lib/scene-keyframe-dependencies.ts";
 import { verifyN1HeroShader } from "../lib/verify/n1-hero-shader.mjs";
 import { verifyNextBuild } from "../lib/verify/next-build.mjs";
 import { verifySceneInSandbox } from "../lib/verify/scene.mjs";
@@ -42,6 +43,15 @@ export default defineHook({
         const contract = sceneContract(taskId, stage);
         const sandbox = await ctx.getSandbox();
         const sceneGuidance = await observeSceneGuidanceInstall(sandbox);
+        const dependencySnapshot = taskId === "scene-quaternion-keyframes"
+          ? await observeSceneKeyframeDependencies(sandbox)
+          : null;
+        const skillAdvertisementSnapshot = taskId === "scene-quaternion-keyframes"
+          ? await observeSceneKeyframeSkillAdvertisement(
+              sandbox,
+              process.env.VGPU_EVALS_VGPU_SKILL_SHA256 ?? "unavailable",
+            )
+          : null;
         const workspaceBytes = await captureWorkspaceTar(sandbox);
         writeTar(snapshotAttemptTarPath(sessionId, turnId, metaId), workspaceBytes);
         writeTar(snapshotTarPath(sessionId), workspaceBytes);
@@ -74,6 +84,8 @@ export default defineHook({
           removedPath: verification.removedPath,
           evidenceExported,
           sceneGuidance,
+          dependencySnapshot,
+          skillAdvertisementSnapshot,
           completedAt: new Date().toISOString(),
         };
         // Intentionally the last host write for this attempt.
@@ -125,4 +137,88 @@ function writeAtomic(destination: string, value: Uint8Array | string): void {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export interface SceneKeyframeSkillAdvertisementSnapshot {
+  schemaVersion: 1;
+  observedAt: string;
+  checkedPaths: string[];
+  expectedFullMarkdownSha256: string;
+  materializedPath: string | null;
+  materializedPresent: boolean;
+  materializedSha256: string | null;
+  materializedOutsideWorkspace: boolean;
+  advertised: boolean;
+  integrity: "pass" | "infrastructure-error";
+  error: string | null;
+}
+
+export async function observeSceneKeyframeSkillAdvertisement(
+  sandbox: SandboxSession,
+  expectedFullMarkdownSha256: string,
+): Promise<SceneKeyframeSkillAdvertisementSnapshot> {
+  const checkedPaths: string[] = [];
+  const errors: string[] = [];
+  let homePath: string | null = null;
+  try {
+    const homeResult = await sandbox.run({ command: `printf '%s\\n' "$HOME"` });
+    const home = (homeResult.stdout ?? "").trim().replace(/\/+$/, "");
+    if (home.startsWith("/") && !home.includes("\n") && !home.includes("\r") && !home.includes("\0")) {
+      homePath = `${home === "/" ? "" : home}/.agents/skills/vgpu/SKILL.md`;
+    } else {
+      errors.push("sandbox home is unavailable or invalid");
+    }
+  } catch (error) {
+    errors.push(`sandbox home lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const candidates = homePath
+    ? [homePath, "/workspace/skills/vgpu/SKILL.md"]
+    : ["/workspace/skills/vgpu/SKILL.md"];
+  let materializedPath: string | null = null;
+  let markdown: string | null = null;
+  for (const path of candidates) {
+    checkedPaths.push(path);
+    try {
+      const value = await sandbox.readTextFile({ path });
+      if (value !== null) {
+        materializedPath = path;
+        markdown = value;
+        break;
+      }
+    } catch (error) {
+      errors.push(`${path} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const materializedPresent = markdown !== null;
+  const materializedSha256 = markdown === null
+    ? null
+    : createHash("sha256").update(markdown).digest("hex");
+  const materializedOutsideWorkspace = materializedPath !== null
+    && materializedPath !== WORKSPACE
+    && !materializedPath.startsWith(`${WORKSPACE}/`);
+  if (!materializedPresent) errors.push("materialized SKILL.md is missing");
+  else if (!materializedOutsideWorkspace) errors.push("materialized SKILL.md is inside /workspace");
+  else if (materializedSha256 !== expectedFullMarkdownSha256) {
+    errors.push(
+      `materialized SKILL.md hash mismatch: expected ${expectedFullMarkdownSha256}, got ${materializedSha256}`,
+    );
+  }
+  const advertised = materializedPresent
+    && materializedOutsideWorkspace
+    && materializedSha256 === expectedFullMarkdownSha256;
+  return {
+    schemaVersion: 1,
+    observedAt: new Date().toISOString(),
+    checkedPaths,
+    expectedFullMarkdownSha256,
+    materializedPath,
+    materializedPresent,
+    materializedSha256,
+    materializedOutsideWorkspace,
+    advertised,
+    integrity: advertised ? "pass" : "infrastructure-error",
+    error: errors.length === 0 ? null : errors.join("; "),
+  };
 }

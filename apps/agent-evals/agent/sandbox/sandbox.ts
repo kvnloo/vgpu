@@ -17,6 +17,10 @@ import {
   sceneExperimentInstallSpecs,
 } from "../../scripts/scene-guidance.mjs";
 import { tarballsFingerprint } from "../../scripts/tarballs-fingerprint.mjs";
+import {
+  initialMathAbsenceErrors,
+  observeSceneKeyframeDependencies,
+} from "../lib/scene-keyframe-dependencies.ts";
 
 const WORKSPACE = "/workspace";
 const TARBALL_DIR_IN_SANDBOX = `${WORKSPACE}/.vgpu-tarballs`;
@@ -247,6 +251,26 @@ async function verifySceneGuidanceInstall(
   manifest: TarballManifest,
   taskId: string,
 ): Promise<void> {
+  if (taskId === "scene-quaternion-keyframes") {
+    const initialDependencySnapshot = await observeSceneKeyframeDependencies(sandbox);
+    const absenceErrors = initialMathAbsenceErrors(initialDependencySnapshot);
+    if (absenceErrors.length > 0) {
+      throw fatal(`bootstrap: initial math absence check failed: ${absenceErrors.join("; ")}`);
+    }
+    const sandboxNode = await sandbox.run({ command: "node -p process.version", workingDirectory: WORKSPACE });
+    writeTemplateProvenance(taskId, {
+      schemaVersion: 1,
+      taskId,
+      sourceKey: manifest.sourceKey,
+      templateKey: `${tarballsFingerprint(tarballsDir())}-${taskId}-${taskSeedFingerprint()}`,
+      initialDependencySnapshot,
+      model: process.env.VGPU_EVALS_MODEL ?? "unavailable",
+      dockerImage: process.env.VGPU_EVALS_DOCKER_IMAGE ?? "unavailable",
+      sandboxRuntime: { node: (sandboxNode.stdout ?? "").trim() || "unavailable" },
+      recordedAt: new Date().toISOString(),
+    });
+    return;
+  }
   const guidance = manifest.sceneGuidance;
   const requiresMathIntegrity = taskId === "scene-math-interop" || Boolean(guidance);
   if (!requiresMathIntegrity) return;

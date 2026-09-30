@@ -9,7 +9,12 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { defineEval, type EveEvalContext, type EveEvalTurn } from "eve/evals";
+import {
+  defineEval,
+  type EveEvalContext,
+  type EveEvalToolCall,
+  type EveEvalTurn,
+} from "eve/evals";
 import { equals } from "eve/evals/expect";
 import { PNG } from "pngjs";
 import {
@@ -31,12 +36,13 @@ import {
 } from "./scene-contracts.mjs";
 import { gradeSceneOutput } from "./grade-scene.mjs";
 import { gradeSceneInterop } from "./scene-interop.mjs";
+import { gradeSceneKeyframes } from "./scene-keyframes.mjs";
 import { bashCalls, docsUsage, sourceFiles } from "./transcript.ts";
 import { turnFailure } from "./turn-failure.mjs";
 import { parseSceneExperimentEnv } from "../../scripts/scene-guidance.mjs";
 import { tarballsFingerprint } from "../../scripts/tarballs-fingerprint.mjs";
 
-type SceneTaskId = "scene-robot-arm" | "scene-shader-bindings" | "scene-warehouse" | "scene-math-interop";
+type SceneTaskId = "scene-robot-arm" | "scene-shader-bindings" | "scene-warehouse" | "scene-math-interop" | "scene-quaternion-keyframes";
 
 interface Correlation {
   stage: number;
@@ -49,7 +55,40 @@ interface SceneAttemptRecord extends Partial<Correlation> {
   cleanupOk?: boolean;
   evidenceExported?: boolean;
   classification?: string;
+  dependencySnapshot?: unknown;
+  skillAdvertisementSnapshot?: {
+    advertised?: boolean;
+    expectedFullMarkdownSha256?: string;
+    materializedPath?: string | null;
+    materializedPresent?: boolean;
+    materializedSha256?: string | null;
+    materializedOutsideWorkspace?: boolean;
+    integrity?: "pass" | "infrastructure-error";
+    error?: string | null;
+  } | null;
 }
+
+type SkillAdvertisementSnapshot = NonNullable<SceneAttemptRecord["skillAdvertisementSnapshot"]>;
+
+const KEYFRAME_HARNESS_FILES = [
+  "apps/agent-evals/agent/hooks/finalize-turn.ts",
+  "apps/agent-evals/agent/lib/scene-keyframe-dependencies.ts",
+  "apps/agent-evals/agent/sandbox/sandbox.ts",
+  "apps/agent-evals/agent/skills/vgpu.ts",
+  "apps/agent-evals/agent/sandbox/tasks/scene-quaternion-keyframes/contract.md",
+  "apps/agent-evals/agent/sandbox/tasks/scene-quaternion-keyframes/example-input.json",
+  "apps/agent-evals/agent/sandbox/tasks/scene-quaternion-keyframes/package.json",
+  "apps/agent-evals/controls/scene-keyframes-reference.mjs",
+  "apps/agent-evals/controls/scene-keyframes-sphere.wgsl",
+  "apps/agent-evals/evals/lib/scene-contracts.mjs",
+  "apps/agent-evals/evals/lib/scene-eval.ts",
+  "apps/agent-evals/evals/lib/scene-keyframes.mjs",
+  "apps/agent-evals/evals/scene-quaternion-keyframes.eval.ts",
+  "apps/agent-evals/scripts/scene-controls.mjs",
+  "apps/agent-evals/scripts/scene-skill-isolation.mjs",
+  "apps/agent-evals/tests/scene-keyframes.test.mjs",
+  "scripts/agent-evals.mjs",
+] as const;
 
 export function sceneEvalDefinitions(
   taskId: SceneTaskId,
@@ -57,8 +96,8 @@ export function sceneEvalDefinitions(
   env: NodeJS.ProcessEnv = process.env,
 ) {
   const { repetitions } = parseSceneExperimentEnv(env);
-  if (taskId === "scene-math-interop" && parseSceneExperimentEnv(env).variant !== null) {
-    throw new Error("scene-math-interop does not participate in the scene guidance experiment");
+  if (["scene-math-interop", "scene-quaternion-keyframes"].includes(taskId) && parseSceneExperimentEnv(env).variant !== null) {
+    throw new Error(`${taskId} does not participate in the scene guidance experiment`);
   }
   const definitions = Array.from({ length: repetitions }, (_, index) =>
     defineEval({
@@ -129,6 +168,14 @@ export async function runSceneEval(
     const sourceHints = collectSceneSourceHints(taskId, workspaceDir);
     const calls = bashCalls(turn.toolCalls);
     const docs = docsUsage(calls);
+    const installAttempts = calls.filter((call) =>
+      /\b(?:npm\s+(?:i|install|add)|pnpm\s+add|yarn\s+add)\b/.test(call.command));
+    const skillLoadCalls = taskId === "scene-quaternion-keyframes"
+      ? collectSkillLoadCalls(
+          turn.toolCalls,
+          process.env.VGPU_EVALS_VGPU_SKILL_BODY_SHA256 ?? "unavailable",
+        )
+      : [];
     t.log(`turn ${stage}: source hints (semantic lead review pending) ${JSON.stringify(sourceHints)}`);
     t.log(`turn ${stage}: docs invocations=${docs.invocations}, bash calls=${calls.length}`);
 
@@ -154,7 +201,12 @@ export async function runSceneEval(
         ]));
         const observedFixtureHashes = readSceneFixtureHashes(join(verifyDir, "fixture-sha256.txt"));
         const fixturesUnmodified = fixturePaths.every((path) => expectedFixtureHashes.get(path) === observedFixtureHashes.get(path));
-        grade = await (taskId === "scene-math-interop" ? gradeSceneInterop : gradeSceneOutput)({
+        const gradeScene = taskId === "scene-math-interop"
+          ? gradeSceneInterop
+          : taskId === "scene-quaternion-keyframes"
+            ? gradeSceneKeyframes
+            : gradeSceneOutput;
+        grade = await gradeScene({
           ...contract,
           result: parsed.value,
           fixtureUnchanged: fixturesUnmodified,
@@ -175,6 +227,23 @@ export async function runSceneEval(
     const usage = turn.events
       .filter((event) => event.type === "step.completed")
       .map((event) => event.data.usage ?? null);
+    const advertisementFields = taskId === "scene-quaternion-keyframes"
+      ? sceneKeyframeAdvertisementFields(complete.skillAdvertisementSnapshot)
+      : null;
+    const keyframeObservations = taskId === "scene-quaternion-keyframes" ? {
+      installAttempts,
+      dependencySnapshot: complete.dependencySnapshot ?? null,
+      skill: {
+        ...advertisementFields!,
+        expectedAdvertisedFullMarkdownSha256: process.env.VGPU_EVALS_VGPU_SKILL_SHA256 ?? "unavailable",
+        expectedLoadedBodySha256: process.env.VGPU_EVALS_VGPU_SKILL_BODY_SHA256 ?? "unavailable",
+        loadCalls: skillLoadCalls,
+        loaded: skillLoadCalls.some((call) => call.successful),
+      },
+    } : {};
+    if (taskId === "scene-quaternion-keyframes" && run.skillDelivery && advertisementFields) {
+      Object.assign(run.skillDelivery, advertisementFields);
+    }
     const turnRecord = {
       ...coordinates,
       contractRevision: contract.revision,
@@ -185,6 +254,7 @@ export async function runSceneEval(
       verdict,
       grade,
       sourceHints,
+      ...keyframeObservations,
       usage,
       toolCalls: turn.toolCalls.length,
     };
@@ -192,16 +262,33 @@ export async function runSceneEval(
     run.turns.push(turnRecord);
     writeJson(join(snapshotDir(sessionId), "scene-run.json"), {
       ...run,
-      templateProvenance: readTemplateProvenance(process.env, process.env.VGPU_EVALS_TARBALLS_DIR || tarballsDir(), taskId),
+      ...sceneTemplateObservation(taskId),
       updatedAt: new Date().toISOString(),
     });
   }
 
   if (sessionId) writeJson(join(snapshotDir(sessionId), "scene-run.json"), {
     ...run,
-    templateProvenance: readTemplateProvenance(process.env, process.env.VGPU_EVALS_TARBALLS_DIR || tarballsDir(), taskId),
+    ...sceneTemplateObservation(taskId),
     completedAt: new Date().toISOString(),
   });
+}
+
+// A cold sandbox template is created during t.send, after run-level provenance
+// was collected. Read its correlated bootstrap receipt when saving each turn.
+export function sceneTemplateObservation(
+  taskId: SceneTaskId,
+  env: NodeJS.ProcessEnv = process.env,
+  tarballDirectory = env.VGPU_EVALS_TARBALLS_DIR || tarballsDir(),
+) {
+  const templateProvenance = readTemplateProvenance(env, tarballDirectory, taskId);
+  return {
+    templateProvenance,
+    ...(taskId === "scene-quaternion-keyframes" ? {
+      initialDependencySnapshot:
+        (templateProvenance as { initialDependencySnapshot?: unknown } | null)?.initialDependencySnapshot ?? null,
+    } : {}),
+  };
 }
 
 export function collectSceneRunProvenance(
@@ -241,6 +328,33 @@ export function collectSceneRunProvenance(
   const templateProvenance = taskId
     ? readTemplateProvenance(env, tarballDirectory, taskId, manifest.sceneGuidance?.docsSha256)
     : null;
+  const repoRoot = env.VGPU_EVALS_REPO_ROOT || process.cwd();
+  const workspaceGit = gitIdentity(repoRoot);
+  const harness = taskId === "scene-quaternion-keyframes"
+    ? harnessIdentity(repoRoot)
+    : null;
+  const skillDelivery = taskId === "scene-quaternion-keyframes" ? {
+    scope: "scene-quaternion-keyframes-only",
+    name: "vgpu",
+    advertised: null,
+    advertisedFullMarkdownSha256: null,
+    expectedAdvertisedFullMarkdownSha256: env.VGPU_EVALS_VGPU_SKILL_SHA256 || "unavailable",
+    observedAdvertisedFullMarkdownSha256: null,
+    materializedPath: null,
+    materializedPresent: false,
+    materializedSha256: null,
+    materializedOutsideWorkspace: false,
+    advertisementIntegrity: "pending",
+    advertisementError: "advertisement was not observed",
+    expectedLoadedBodySha256: env.VGPU_EVALS_VGPU_SKILL_BODY_SHA256 || "unavailable",
+    generatorSha256: env.VGPU_EVALS_VGPU_SKILL_GENERATOR_SHA256 || "unavailable",
+    packageGitHead: manifest.gitSha || "unavailable",
+    workspaceGitHead: workspaceGit.head,
+    workspaceDirty: workspaceGit.dirty,
+    harnessAggregateSha256: harness?.aggregateSha256 ?? "unavailable",
+    harnessFiles: harness?.files ?? [],
+    delivery: "SKILL.md only; blender resources not delivered",
+  } : null;
   return {
     contractRevision: taskId ? sceneContractRevision(taskId) : SCENE_CONTRACT_REVISION,
     model: env.VGPU_EVALS_MODEL || "anthropic/claude-sonnet-5",
@@ -252,6 +366,7 @@ export function collectSceneRunProvenance(
     tarballManifestError: manifestError,
     tarballs,
     sceneGuidance: manifest.sceneGuidance ?? null,
+    ...(skillDelivery ? { skillDelivery } : {}),
     templateProvenance,
     eveVersion: resolvedPackageVersion("eve"),
     sandboxBackend: env.VGPU_EVALS_SANDBOX || "docker",
@@ -266,7 +381,7 @@ function readTemplateProvenance(
   taskId: SceneTaskId,
   knownDocsSha256?: string,
 ): unknown {
-  if (taskId === "scene-math-interop") {
+  if (taskId === "scene-math-interop" || taskId === "scene-quaternion-keyframes") {
     try {
       const provenance = JSON.parse(readFileSync(join(
         env.VGPU_EVALS_WORK_DIR || join(dirname(tarballDirectory), ".."),
@@ -276,7 +391,7 @@ function readTemplateProvenance(
       const seedKey = env.VGPU_EVALS_TASK_SEED_KEY;
       const expectedKey = seedKey ? `${tarballsFingerprint(tarballDirectory)}-${taskId}-${seedKey}` : null;
       if (!expectedKey || provenance.templateKey !== expectedKey) {
-        return { unavailable: true, reason: "stale or uncorrelated interop template provenance" };
+        return { unavailable: true, reason: `stale or uncorrelated ${taskId} template provenance` };
       }
       return provenance;
     } catch {
@@ -355,6 +470,9 @@ function collectSceneSourceHints(taskId: SceneTaskId, root: string) {
     mentionsSceneImport: /["']vgpu\/scene(?:\/gpu)?["']/.test(source),
     mentionsVgpuNodeImport: /["']vgpu\/node["']/.test(source),
     mentionsMathImport: /["']math["']/.test(authoredSource),
+    ...(taskId === "scene-quaternion-keyframes"
+      ? { mentionsWgpuMatrixImport: /["']wgpu-matrix["']/.test(authoredSource) }
+      : {}),
     seededEcsMentionsMathImport: taskId === "scene-math-interop"
       ? files.some((file) => file.path.startsWith("ecs/") && /["']math["']/.test(file.content))
       : null,
@@ -367,7 +485,75 @@ function collectSceneSourceHints(taskId: SceneTaskId, root: string) {
   };
 }
 
-function sha256(bytes: Uint8Array): string {
+export function collectSkillLoadCalls(
+  toolCalls: readonly EveEvalToolCall[],
+  expectedLoadedBodySha256: string,
+) {
+  return toolCalls.filter((call) => call.name === "load_skill").map((call) => {
+    const skill = typeof call.input.skill === "string" ? call.input.skill : null;
+    const observedLoadedBodySha256 = typeof call.output === "string" ? sha256(call.output) : null;
+    const matchesExpectedLoadedBodySha256 = observedLoadedBodySha256 !== null
+      && observedLoadedBodySha256 === expectedLoadedBodySha256;
+    return {
+      skill,
+      status: call.status,
+      outputSha256: observedLoadedBodySha256,
+      observedLoadedBodySha256,
+      matchesExpectedLoadedBodySha256,
+      successful: skill === "vgpu"
+        && call.status === "completed"
+        && matchesExpectedLoadedBodySha256,
+    };
+  });
+}
+
+export function sceneKeyframeAdvertisementFields(
+  snapshot: SkillAdvertisementSnapshot | null | undefined,
+) {
+  return {
+    advertised: snapshot?.advertised === true,
+    advertisedFullMarkdownSha256: snapshot?.advertised === true
+      ? snapshot.materializedSha256 ?? null
+      : null,
+    observedAdvertisedFullMarkdownSha256: snapshot?.materializedSha256 ?? null,
+    materializedPath: snapshot?.materializedPath ?? null,
+    materializedPresent: snapshot?.materializedPresent === true,
+    materializedSha256: snapshot?.materializedSha256 ?? null,
+    materializedOutsideWorkspace: snapshot?.materializedOutsideWorkspace === true,
+    advertisementIntegrity: snapshot?.integrity ?? "infrastructure-error",
+    advertisementError: snapshot == null
+      ? "advertisement was not observed"
+      : snapshot.error ?? null,
+  };
+}
+
+function gitIdentity(repoRoot: string): {
+  head: string;
+  dirty: boolean | "unavailable";
+} {
+  const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" });
+  const status = spawnSync("git", ["status", "--porcelain"], { cwd: repoRoot, encoding: "utf8" });
+  return {
+    head: head.status === 0 ? head.stdout.trim() : "unavailable",
+    dirty: status.status === 0 ? status.stdout.trim().length > 0 : "unavailable",
+  };
+}
+
+function harnessIdentity(repoRoot: string): {
+  aggregateSha256: string;
+  files: { path: string; sha256: string }[];
+} {
+  const aggregate = createHash("sha256");
+  const files = KEYFRAME_HARNESS_FILES.map((path) => {
+    const bytes = readFileSync(join(repoRoot, path));
+    const digest = sha256(bytes);
+    aggregate.update(path).update("\0").update(digest).update("\0");
+    return { path, sha256: digest };
+  });
+  return { aggregateSha256: aggregate.digest("hex"), files };
+}
+
+function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
