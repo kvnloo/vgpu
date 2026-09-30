@@ -1,6 +1,6 @@
 ---
 name: vgpu-agent-flow
-description: Lead workflow for developing vgpu features with the repository's subharness specialists — research, API design, human-validated decisions, planning, parallel implementation with docs and review, integration. Use when the human asks to research, design, plan, or implement a vgpu feature, shader, material, or simulation with agents, or mentions the agent flow, specialists, or subharness team.
+description: Lead workflow for developing vgpu features and Blender assets with the repository's subharness specialists. Use for agent-based research, API design, implementation, shaders, materials, simulations, or ImageGen-guided asset iteration, and when the human mentions the agent flow or subharness team.
 ---
 
 # vgpu agent flow
@@ -11,6 +11,11 @@ conversation with the human, every decision, every worktree, and every merge. Sp
 talk to the human and never see this conversation — each prompt must carry the full context.
 
 ## Team
+
+For Blender assets and image-guided visual refinement, use the
+[asset iteration lane](references/asset-iteration.md). It pairs an Astra author with declared
+Opus 5.5 shader/runtime and critique children, with measured screenshots and evidence-based lessons.
+The normal API phases below still apply if the asset work changes a public API.
 
 | Target | Harness / model | Role |
 |---|---|---|
@@ -23,6 +28,9 @@ talk to the human and never see this conversation — each prompt must carry the
 | `repo:writer` | Claude `claude-opus-5.5` high → Codex `gpt-5.6-sol` high | Docs in house style (called by implementer, or by you for docs-only work) |
 | `repo:reviewer` | Claude `claude-opus-5.5` high → Codex `gpt-6-astra` high | Read-only review (called by implementer per task, and by you after integration) |
 | `repo:builder` | Codex `gpt-5.6-sol` high → Claude `claude-opus-5.5` high | Applies a bounded list of integration-review findings |
+| `repo:asset-author` | Codex `gpt-6-astra` high (no fallback) | Blender modeling, renders, environment lighting and AO/lightmap bakes; declares runtime and critic children |
+| `repo:asset-runtime` | Claude `claude-opus-5.5` high (no fallback) | Shaders, browser rendering and parity with Blender; called by asset-author |
+| `repo:asset-critic` | Claude `claude-opus-5.5` high (no fallback) | Actual capture and cost review, called by asset-author |
 | `repo:example-builder` | Claude `claude-opus-5.5` xhigh | One docs gallery example end to end from a brief; sees it running through `capture_preview`; runs `example-reviewer`; commits |
 | `repo:example-reviewer` | Claude `claude-opus-5.5` high | Example review: code plus hands-on interaction checks through `capture_preview` (called by example-builder) |
 
@@ -183,6 +191,10 @@ each suggestion against the next brief and the repository rules, apply the ones 
 the playbook or tools, and log feedback, verdicts, and changes in `.context/work/<topic>/iterations.md`.
 
 ## Running specialists
+
+Use the [agent handoff contract](references/agent-handoffs.md) for task assignments, results and
+review follow-ups. Keep full evidence on disk, pass compact revision-specific summaries, and use
+the executor's receipt to establish which artifacts were actually built or reviewed.
 
 - Prefer one ordinary `subharness run ...` per specialist through your background-command
   controls, continue other work, and collect the result. Otherwise use `--detach` and later

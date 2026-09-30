@@ -24,7 +24,7 @@ Repository facts that matter to every role:
 - Keep shaders compat-safe: bind depth attachments as unfilterable \`texture_2d<f32>\` to read them, and use integer hashes (pcg) instead of \`fract(sin(x) * k)\`.
 - Filenames under packages/, apps/, examples/, scripts/ and docs/ must be kebab-case (\`pnpm check:filenames\`).
 - Useful checks: \`pnpm typecheck\`, \`pnpm test:fast\`, \`pnpm test\`, \`pnpm docs:verify-snippets\`, \`pnpm check:skill-drift\`.
-- The product skill at skills/vgpu is generated and version-neutral; never hand-edit it.
+- The router skills/vgpu/SKILL.md is generated and version-neutral; change its generator rather than hand-editing it. Resources under skills/vgpu/blender/ are authored in place.
 `.trim();
 
 /** Where pipeline artifacts live. Everything here is gitignored scratch, never committed. */
@@ -36,6 +36,8 @@ Pipeline artifacts live under .context/work/<topic>/ at the working-directory ro
 - plan/index.md, plan/tasks/<id>-<slug>.md, plan/progress.md — implementation plan and progress log.
 - plan/progress/<task-id>.md — per-task progress notes written by implementers (merged into progress.md by the lead).
 The caller supplies <topic>. Create missing directories inside your allowed area only.
+
+Keep agent handoffs compact and evidence-backed. Read .claude/skills/vgpu-agent-flow/references/agent-handoffs.md when handing work to another agent or reporting a result. Keep full logs, manifests and reviews on disk; return the outcome, changed artifacts, decisive evidence, exact checks/results and the next action or remaining blocker. Follow-ups describe changes since the previous handoff, while retaining the governing paths and revision identity. Do not repeat the full history or load every artifact into the caller's context. Separate observed facts from suspected causes and unperformed checks. Each shared record has one writer; an execution owner's receipt establishes which source/build was actually run, while another agent's request does not.
 `.trim();
 
 /** Delegation etiquette for agents that declare children. */
@@ -45,6 +47,7 @@ When delegation is authorized, use the exact provided private launcher with run 
 Keep the host background-command identifier as well as Subharness task/session identifiers. Collect the attached command's complete result and check its task state; an early response or an exit code of 0 is not necessarily completion. If work remains pending, observe subsequent responses with \`wait <task-id> --after <response-id>\`. External chat reactivation depends on the host; --detach alone does not configure a completion notification. Do not stop coordinating an authorized implementation merely because its workers were launched.
 
 Subharness 0.0.4 can return \`approval_required\` with request-specific schemas. Inspect the requested action and existing authorization before answering an offered choice using \`respond <request-id> --content-file <path>\`, then observe the same task without replaying it. Never approve your own request, broaden native policy, or treat a hard sandbox denial as an approval request. Unsupported interactive input can still fail with INPUT_REQUIRED. Claude steering may be delivered as interruption and cancel descendants; prefer queued follow-ups when interruption is unnecessary.
+Define one bounded outcome and acceptance condition per child task. Include the input revision, invariants and evidence paths; put detailed context in referenced files. Delegate independent owned files in parallel, but do not start dependent validation against unfinished artifacts. Read the result summary and decisive evidence first, expanding only for unresolved findings or required coverage. A short handoff must still identify all blockers and unperformed checks. Consolidate findings into one prioritized revision request instead of relaying each comment as a new agent turn.
 `.trim();
 
 /** Rules shared by both research specialists. */
