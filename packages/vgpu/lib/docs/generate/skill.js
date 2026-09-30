@@ -102,6 +102,32 @@ the authority for a project pinned to another version.
 
 If the installed docs do not contain a proposed API or workflow, do not invent it or silently
 switch versions. Report the mismatch and change versions only when the user's task authorizes it.
+
+## Optional numerical helpers for scenes
+
+Keep scene hierarchy, instance identity and GPU publication in vgpu. For numerical work beyond
+its scene conveniences, consider [pmndrs/math](https://github.com/pmndrs/math) as an optional
+application dependency. Useful cases include:
+
+- Interpolating quaternion orientations between animation keyframes, or general vector/matrix work.
+- Spatial queries such as ray intersections for picking or bounds tests.
+- Springs, easing, procedural noise or inverse kinematics feeding scene transforms.
+
+Prefer an existing suitable math, animation or physics library when the project already has one;
+do not install another just for a simple transform that vgpu already supports. If a new numerical
+dependency fits the task, install it with the project's package manager and read its own version's
+documentation. vgpu does not require \`math\` and does not re-export it.
+
+Find interoperability examples through the installed CLI:
+
+\`\`\`sh
+pnpm exec vgpu docs find "math"
+pnpm exec vgpu docs cat "<guide path returned by find>"
+\`\`\`
+
+These are virtual documentation paths, not filesystem paths. Follow the installed guide's array,
+quaternion and projection conventions. Keep one owner for world transforms (vgpu or an external
+ECS/physics system), and publish changed instance matrices and camera uniforms explicitly.
 `;
 
 // These skill resources are authored in place, not generated from the versioned CLI corpus.
