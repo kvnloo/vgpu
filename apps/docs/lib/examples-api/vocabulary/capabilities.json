@@ -13,6 +13,7 @@
   "fixed-timestep",
   "fragment-shader",
   "gpu-buffer-interop",
+  "gpu-readback",
   "hdr",
   "instanced-rendering",
   "instancing",
