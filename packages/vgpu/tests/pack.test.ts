@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { expect, test } from "vitest";
+import { evaluateBudget, measuredTarballPayload, parseTarEntries, resolvePackageAudience, resolveThreshold } from "../../../scripts/lib/bundle-budgets.mjs";
 
 const packageDir = new URL("..", import.meta.url).pathname;
 
@@ -16,7 +18,6 @@ test("dry-run pack includes bundled docs artifact", () => {
 
   expect(files).toContain("bin/vgpu.js");
   expect(files).toContain("lib/generated/docs-manifest.generated.js");
-  expect(pack.size).toBeLessThan(925_000);
 });
 
 test("packed install exposes vgpu docs bin", () => {
@@ -29,6 +30,17 @@ test("packed install exposes vgpu docs bin", () => {
       { cwd: packageDir, encoding: "utf8" }
     );
     const tarball = join(packDir, output.trim().split(/\r?\n/u).at(-1));
+    // Share the repository's measured, tool-updated budget; keep the CLI's zero-growth gate.
+    const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+    const entries = parseTarEntries(gunzipSync(readFileSync(tarball)));
+    const measuredBytes = gzipSync(measuredTarballPayload(entries)).length;
+    const verdict = evaluateBudget({
+      measuredBytes,
+      budgetBytes: manifest.vgpuBundleBudgetGzipBytes,
+      audience: resolvePackageAudience(manifest),
+      threshold: resolveThreshold(manifest),
+    });
+    expect(verdict.status, JSON.stringify(verdict)).toBe("ok");
     execFileSync("npm", ["install", tarball, "--prefix", installDir], {
       stdio: "pipe",
     });
