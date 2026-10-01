@@ -24,14 +24,14 @@ test("packed install exposes vgpu docs bin", () => {
   const packDir = mkdtempSync(join(tmpdir(), "vgpu-pack-"));
   const installDir = mkdtempSync(join(tmpdir(), "vgpu-install-"));
   try {
-    const output = execFileSync(
-      "npm",
+    execFileSync(
+      "pnpm",
       ["pack", "--pack-destination", packDir],
       { cwd: packageDir, encoding: "utf8" }
     );
-    const tarball = join(packDir, output.trim().split(/\r?\n/u).at(-1));
-    // Share the repository's measured, tool-updated budget; keep the CLI's zero-growth gate.
+    // Use the same packer and payload as bundle-check; keep the CLI's zero-growth gate.
     const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+    const tarball = join(packDir, `${manifest.name.replace("@", "").replace("/", "-")}-${manifest.version}.tgz`);
     const entries = parseTarEntries(gunzipSync(readFileSync(tarball)));
     const measuredBytes = gzipSync(measuredTarballPayload(entries)).length;
     const verdict = evaluateBudget({
