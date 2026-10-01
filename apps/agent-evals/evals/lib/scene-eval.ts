@@ -57,6 +57,12 @@ interface SceneAttemptRecord extends Partial<Correlation> {
   classification?: string;
   dependencySnapshot?: unknown;
   skillAdvertisementSnapshot?: {
+    sceneReference?: {
+      path: string | null;
+      expectedSha256: string;
+      sha256: string | null;
+      matches: boolean;
+    } | null;
     advertised?: boolean;
     expectedFullMarkdownSha256?: string;
     materializedPath?: string | null;
@@ -346,6 +352,7 @@ export function collectSceneRunProvenance(
     materializedOutsideWorkspace: false,
     advertisementIntegrity: "pending",
     advertisementError: "advertisement was not observed",
+    expectedSceneReferenceSha256: env.VGPU_EVALS_VGPU_SCENE_SKILL_SHA256 || "unavailable",
     expectedLoadedBodySha256: env.VGPU_EVALS_VGPU_SKILL_BODY_SHA256 || "unavailable",
     generatorSha256: env.VGPU_EVALS_VGPU_SKILL_GENERATOR_SHA256 || "unavailable",
     packageGitHead: manifest.gitSha || "unavailable",
@@ -353,7 +360,7 @@ export function collectSceneRunProvenance(
     workspaceDirty: workspaceGit.dirty,
     harnessAggregateSha256: harness?.aggregateSha256 ?? "unavailable",
     harnessFiles: harness?.files ?? [],
-    delivery: "SKILL.md only; blender resources not delivered",
+    delivery: "SKILL.md and scene.md; blender resources not delivered",
   } : null;
   return {
     contractRevision: taskId ? sceneContractRevision(taskId) : SCENE_CONTRACT_REVISION,
@@ -511,6 +518,7 @@ export function sceneKeyframeAdvertisementFields(
   snapshot: SkillAdvertisementSnapshot | null | undefined,
 ) {
   return {
+    sceneReference: snapshot?.sceneReference ?? null,
     advertised: snapshot?.advertised === true,
     advertisedFullMarkdownSha256: snapshot?.advertised === true
       ? snapshot.materializedSha256 ?? null

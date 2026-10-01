@@ -24,7 +24,7 @@ Repository facts that matter to every role:
 - Keep shaders compat-safe: bind depth attachments as unfilterable \`texture_2d<f32>\` to read them, and use integer hashes (pcg) instead of \`fract(sin(x) * k)\`.
 - Filenames under packages/, apps/, examples/, scripts/ and docs/ must be kebab-case (\`pnpm check:filenames\`).
 - Useful checks: \`pnpm typecheck\`, \`pnpm test:fast\`, \`pnpm test\`, \`pnpm docs:verify-snippets\`, \`pnpm check:skill-drift\`.
-- The router skills/vgpu/SKILL.md is generated and version-neutral; change its generator rather than hand-editing it. Resources under skills/vgpu/blender/ are authored in place.
+- The router skills/vgpu/SKILL.md is generated and version-neutral; change its generator rather than hand-editing it. skills/vgpu/scene.md and resources under skills/vgpu/blender/ are authored in place.
 `.trim();
 
 /** Where pipeline artifacts live. Everything here is gitignored scratch, never committed. */

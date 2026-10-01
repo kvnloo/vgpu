@@ -96,7 +96,7 @@ so run the command above explicitly.
 | `tests/scene-guidance.test.mjs` | [Docs guidance experiment](#docs-guidance-experiment-opt-in): selector and repetition parsing, pinned model/image, corpus restriction on synthetic and the real `a8a9bc8a`/`929b97f5` manifests, baseline tarball isolation and tamper rejection, lock normalization, unchanged default seeds, per-turn deviation records |
 | `tests/scene-guidance-analysis.test.mjs` | Delivered guide content versus discovery, per-turn exposure, truncation, event deduplication, usage totals, and possible contamination |
 | `tests/scene-interop.test.mjs` | Neutral contracts and seeds still match the frozen hashes in `tests/fixtures/scene-neutral-v1.json`; the interop revision, inputs, and prompts; fixture invariants, and state/pixel gates rejecting isolated faults on synthetic output; native control stages and expected frames; the seed ECS's stable buffers, parent propagation, and generational row reuse; the oracle reproducing the contract example; the ECS agreeing with the oracle over both turn inputs |
-| `tests/scene-keyframes.test.mjs` | The [quaternion task](#scene-quaternion-keyframes): oracle against the contract example and an independent closed form, sign invariance and clamping; frozen fixture hashes and geometric invariants; the grader accepting a synthetic disc rendering; a three-file seed and prompts that name no package, technique, or API; dispatch with every neutral contract and seed hash unchanged; the guidance selector rejected with exit 2 before auth or packing; the skill resolver returning `null` for other task IDs |
+| `tests/scene-keyframes.test.mjs` | The [quaternion task](#scene-quaternion-keyframes): oracle against the contract example and an independent closed form, sign invariance and clamping; frozen fixture hashes and geometric invariants; the grader accepting a synthetic disc rendering; a three-file seed and prompts that name no package, technique, or API; dispatch with every neutral contract and seed hash unchanged; the guidance selector rejected with exit 2 before auth or packing; the skill resolver returning `null` for other task IDs; scene-reference hash validation and advertisement rejecting missing or changed sibling files |
 
 Synthetic images validate grader logic only. They are not native controls.
 
@@ -775,7 +775,7 @@ lead decision.
 | Turns | Two, in one session |
 | Image | 512×384, orthographic camera, WebGPU `[0, 1]` depth |
 | Instructions | The neutral `agent/instructions.md`, unchanged |
-| Skill | The generated public `skills/vgpu/SKILL.md`, for this task only |
+| Skill | The public `skills/vgpu/SKILL.md` and authored `scene.md`, for this task only |
 | Budgets | The same as the neutral tasks: 60 s per rerun, 20 minutes per task run |
 
 Contract, prompts, inputs, the oracle, and the grader live in `evals/lib/scene-keyframes.mjs`,
@@ -907,14 +907,16 @@ separately from the dependency state that results, per turn.
 
 `agent/skills/vgpu.ts` is an Eve dynamic skill resolved on `session.started`. It returns the public
 skill only when `VGPU_EVALS_TASK` is `scene-quaternion-keyframes` and `null` for every other task,
-so no other task advertises a new skill. The launcher reads the generated `skills/vgpu/SKILL.md`,
-exits **2** if it or the skill generator source is missing, and passes the path and both SHA-256
-values to the runtime. The resolver rereads the file and throws on a hash mismatch, so a stale or
-task-specific copy cannot be served. The skill's bytes enter this task's seed hash only, so a skill
-change rebuilds this task's template and no other.
+so no other task advertises a new skill. The launcher reads the generated `skills/vgpu/SKILL.md`
+and its sibling `scene.md`, exits **2** if either file or the skill generator source is missing,
+and passes the entrypoint path and file SHA-256 values to the runtime. The resolver rereads both files and
+throws on a hash mismatch, so a stale or task-specific copy cannot be served. Both files' bytes
+enter this task's seed hash only, so a skill change rebuilds this task's template and no other.
 
-Only `SKILL.md` is delivered; the skill's `blender/` resources are not, and this task does not need
-them. The generic agent instructions and the prompts are unchanged. Before the pilot, Eve's mock
+`SKILL.md` and `scene.md` are delivered as sibling files; the skill's `blender/` resources are
+not, and this task does not need them. Loading the entrypoint does not automatically read the
+scene reference; its availability is not evidence that the agent read it. The generic agent
+instructions and the prompts are unchanged. Before a pilot, Eve's mock
 model receives a no-resolver baseline and null-resolver captures for the other tasks; their
 model-visible system prompts and framework tool lists must be identical.
 
@@ -929,14 +931,21 @@ that only advertised the skill is reported as "advertised, not loaded", never as
 Advertisement is observed rather than inferred from launcher configuration. At turn completion,
 the hook resolves the sandbox `$HOME`, reads `$HOME/.agents/skills/vgpu/SKILL.md`, and records its
 path, existence, full hash, and whether it is outside `/workspace`. `advertised` is true only when
-that file exists outside the graded workspace and its full hash exactly matches the frozen skill.
+that file exists outside the graded workspace and its full hash exactly matches the frozen skill,
+and the sibling `scene.md` exists with the frozen reference hash. The hook records the reference
+path, expected and observed hashes, and match result under `sceneReference`.
 A missing file, one-byte mutation, or Eve's `/workspace/skills/` fallback records
 `integrity: "infrastructure-error"` and cannot be reported as advertised.
 
-The pre-pilot skill-isolation check uses Eve 0.29.5's dynamic-skill lifecycle, `mockModel`, an
+The skill-isolation check uses Eve 0.29.5's dynamic-skill lifecycle, `mockModel`, an
 in-memory `SandboxSession`, and Eve's actual `load_skill` implementation. It verifies byte-identical
 model-visible prompts and tools for `scene-robot-arm`, `scene-math-interop`, and `s2-gradient`, then
-loads the target skill and rejects a mutated body. For the frozen package Git
+loads the target skill, verifies that `scene.md` is materialized alongside it, and rejects a
+mutated entrypoint body. The historical pilot below delivered only `SKILL.md`; the split reference
+was introduced afterward. Its [two-session follow-up](scene-skill-split-findings.md) verified
+reference delivery, but neither agent read the skill or reference.
+
+For the historical pilot's frozen package Git
 `b6ec97a379e238cb37f492e30a73cdcad03e908d`, the advertised full-markdown hash is
 `31011aa5d7e62408cc21619de2af0dee2062b75646df398dc3bbf3bdae22b51c` and the delivered body hash is
 `285789ace4fd0f82333c5a6d471a76f73d7ccbc907e00bb7f5d2448e48ec50e3`. Evidence is in
@@ -958,6 +967,8 @@ advertisement integrity is not `pass`.
 | `skillDelivery.materializedSha256`, `skillDelivery.materializedOutsideWorkspace` | Actual full hash and isolation from the graded workspace |
 | `skillDelivery.advertisementIntegrity`, `skillDelivery.advertisementError` | `pass` or `infrastructure-error`, with the concrete failure |
 | `skillDelivery.expectedLoadedBodySha256` | Expected `load_skill` result after Eve removes frontmatter |
+| `skillDelivery.expectedSceneReferenceSha256` | Frozen authored `scene.md` hash supplied by the launcher |
+| `skillDelivery.sceneReference` | Observed reference path, expected/actual hashes and match result; does not imply a read |
 | `skillDelivery.generatorSha256` | Skill generator source identity |
 | `skillDelivery.packageGitHead` | Git revision used by the packed vgpu packages |
 | `skillDelivery.workspaceGitHead`, `skillDelivery.workspaceDirty` | App/harness checkout identity; the dirty flag is expected before the lead-owned commit |

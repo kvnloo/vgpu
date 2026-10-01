@@ -18,6 +18,8 @@ export async function runSceneSkillIsolation({ outputRoot } = {}) {
   mkdirSync(evidenceDir, { recursive: true });
 
   const skillMarkdown = readFileSync(SKILL_PATH, "utf8");
+  const sceneMarkdown = readFileSync(join(dirname(SKILL_PATH), "scene.md"), "utf8");
+  const sceneSha256 = sha256(sceneMarkdown);
   const skillSha256 = sha256(skillMarkdown);
   const skillBodySha256 = sha256(stripFrontmatter(skillMarkdown));
   const internals = await eveInternals();
@@ -36,6 +38,7 @@ export async function runSceneSkillIsolation({ outputRoot } = {}) {
   const mutatedSkillPath = join(evidenceDir, "mutated-SKILL.md");
   const mutatedMarkdown = skillMarkdown.replace("# vgpu", "# vgpu mutation sentinel");
   writeFileSync(mutatedSkillPath, mutatedMarkdown);
+  writeFileSync(join(evidenceDir, "scene.md"), sceneMarkdown);
   const mutatedTarget = await captureModelVisible(internals, {
     taskId: TARGET_TASK,
     skillPath: mutatedSkillPath,
@@ -75,14 +78,15 @@ export async function runSceneSkillIsolation({ outputRoot } = {}) {
     },
     baseline: summarizeCapture(baseline),
     nullTasks: Object.fromEntries(Object.entries(nullCaptures).map(([taskId, capture]) => [taskId, summarizeCapture(capture)])),
-    target: { ...summarizeCapture(target), advertised, loaded, observedLoadedBodySha256 },
+    target: { ...summarizeCapture(target), advertised, loaded, observedLoadedBodySha256,
+      sceneSha256, observedSceneSha256: target.sceneSha256, sceneMaterialized: target.sceneSha256 === sceneSha256 },
     mutatedTarget: {
       ...summarizeCapture(mutatedTarget),
       observedLoadedBodySha256: mutatedObservedBodySha256,
       rejectedAgainstFrozenBody: mutatedBodyRejected,
     },
     mismatches,
-    ok: mismatches.length === 0 && advertised && loaded && mutatedBodyRejected,
+    ok: mismatches.length === 0 && advertised && loaded && mutatedBodyRejected && target.sceneSha256 === sceneSha256,
   };
   writeFileSync(join(evidenceDir, "summary.json"), `${JSON.stringify(result, null, 2)}\n`);
   if (!result.ok) {
@@ -150,6 +154,7 @@ async function captureModelVisible(internals, options) {
     systemMessages: request.messages.filter((message) => message.role === "system"),
     tools: request.tools,
     loadedBody,
+    sceneSha256: await sandbox.readTextFile({ path: "/home/eve/.agents/skills/vgpu/scene.md" }).then((value) => value === null ? null : sha256(value)),
   };
 }
 

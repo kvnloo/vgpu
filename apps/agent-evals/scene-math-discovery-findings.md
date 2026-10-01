@@ -12,11 +12,12 @@ per-turn checks, dependency evidence, costs and the excluded infrastructure atte
 
 ## Change and question
 
-The [public vgpu skill](../../skills/vgpu/SKILL.md) now presents pmndrs/math as an optional
+At pilot revision `b6ec97a3`, the public vgpu skill presented pmndrs/math as an optional
 application dependency for quaternion interpolation, spatial queries, springs, easing, noise and
 inverse kinematics. It prefers a suitable existing dependency, points to the installed CLI's
 interoperability guide, and keeps transform ownership and GPU publication explicit. No vgpu
-runtime or peer dependency was added.
+runtime or peer dependency was added. This guidance now lives in the linked
+[scene reference](../../skills/vgpu/scene.md).
 
 The new [eval contract](scene-evals.md#scene-quaternion-keyframes) asks for a rotating body with
 three colored markers, constant-angular-speed interpolation and equivalent quaternion signs.

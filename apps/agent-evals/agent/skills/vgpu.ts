@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { defineDynamic, defineSkill } from "eve/skills";
 
 const TASK_ID = "scene-quaternion-keyframes";
@@ -7,6 +8,7 @@ const TASK_ID = "scene-quaternion-keyframes";
 interface SkillOptions {
   skillPath?: string;
   expectedSha256?: string;
+  expectedSceneSha256?: string;
 }
 
 export function readTaskVgpuSkill(taskId: string | undefined, options: SkillOptions = {}) {
@@ -21,7 +23,13 @@ export function readTaskVgpuSkill(taskId: string | undefined, options: SkillOpti
   }
   const description = skillDescription(markdown);
   if (!description) throw new Error("vgpu skill has no description frontmatter");
-  return { description, markdown, sha256, files: undefined };
+  const sceneMarkdown = readFileSync(join(dirname(skillPath), "scene.md"), "utf8");
+  const sceneSha256 = createHash("sha256").update(sceneMarkdown).digest("hex");
+  const expectedSceneSha256 = options.expectedSceneSha256 ?? process.env.VGPU_EVALS_VGPU_SCENE_SKILL_SHA256;
+  if (expectedSceneSha256 && sceneSha256 !== expectedSceneSha256) {
+    throw new Error(`vgpu scene skill hash mismatch: expected ${expectedSceneSha256}, got ${sceneSha256}`);
+  }
+  return { description, markdown, sha256, sceneSha256, files: { "scene.md": sceneMarkdown } };
 }
 
 function skillDescription(markdown: string): string | undefined {
@@ -46,7 +54,7 @@ export default defineDynamic({
   events: {
     "session.started": () => {
       const skill = readTaskVgpuSkill(process.env.VGPU_EVALS_TASK);
-      return skill ? defineSkill({ description: skill.description, markdown: skill.markdown }) : null;
+      return skill ? defineSkill({ description: skill.description, markdown: skill.markdown, files: skill.files }) : null;
     },
   },
 });

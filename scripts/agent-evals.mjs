@@ -74,6 +74,7 @@ if (!Number.isInteger(major) || major < REQUIRED_MAJOR) {
 // One flag drives BOTH the environment variable the sandbox reads and the eval
 // filter, so the two can never disagree about what is running.
 const TASKS_DIR = join(PACKAGE_DIR, "agent", "sandbox", "tasks");
+const VGPU_SCENE_SKILL_PATH = join(REPO_ROOT, "skills", "vgpu", "scene.md");
 const VGPU_SKILL_PATH = join(REPO_ROOT, "skills", "vgpu", "SKILL.md");
 const VGPU_SKILL_GENERATOR_PATH = join(REPO_ROOT, "packages", "vgpu", "lib", "docs", "generate", "skill.js");
 
@@ -286,10 +287,12 @@ const hashTree = (dir, prefix = "") => {
 };
 hashTree(join(TASKS_DIR, taskId));
 if (taskId === "scene-quaternion-keyframes") {
-  for (const path of [VGPU_SKILL_PATH, VGPU_SKILL_GENERATOR_PATH]) {
+  for (const path of [VGPU_SKILL_PATH, VGPU_SCENE_SKILL_PATH, VGPU_SKILL_GENERATOR_PATH]) {
     if (!existsSync(path)) usage(`scene-quaternion-keyframes requires ${path}.`);
   }
   const skillBytes = readFileSync(VGPU_SKILL_PATH);
+  const sceneBytes = readFileSync(VGPU_SCENE_SKILL_PATH);
+  const sceneSha256 = createHash("sha256").update(sceneBytes).digest("hex");
   const generatorBytes = readFileSync(VGPU_SKILL_GENERATOR_PATH);
   const skillSha256 = createHash("sha256").update(skillBytes).digest("hex");
   const skillBody = skillBytes.toString("utf8").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
@@ -297,6 +300,9 @@ if (taskId === "scene-quaternion-keyframes") {
   const generatorSha256 = createHash("sha256").update(generatorBytes).digest("hex");
   seedHash.update("task-skill/skills/vgpu/SKILL.md");
   seedHash.update(skillBytes);
+  seedHash.update("task-skill/skills/vgpu/scene.md");
+  seedHash.update(sceneBytes);
+  process.env.VGPU_EVALS_VGPU_SCENE_SKILL_SHA256 = sceneSha256;
   process.env.VGPU_EVALS_VGPU_SKILL_PATH = VGPU_SKILL_PATH;
   process.env.VGPU_EVALS_VGPU_SKILL_SHA256 = skillSha256;
   process.env.VGPU_EVALS_VGPU_SKILL_BODY_SHA256 = skillBodySha256;

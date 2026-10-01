@@ -244,7 +244,33 @@ test("the public skill bytes resolve only for the quaternion task", () => {
   assert.equal(resolved.markdown, markdown);
   assert.equal(resolved.sha256, expectedSha256);
   assert.match(resolved.description, /vgpu/i);
-  assert.equal(resolved.files, undefined);
+  const sceneMarkdown = readFileSync(join(process.cwd(), "skills/vgpu/scene.md"), "utf8");
+  assert.deepEqual(resolved.files, { "scene.md": sceneMarkdown });
+  assert.equal(resolved.sceneSha256, sha256(sceneMarkdown));
+  assert.throws(() => readTaskVgpuSkill("scene-quaternion-keyframes", {
+    skillPath, expectedSha256, expectedSceneSha256: "stale",
+  }), /scene skill hash mismatch/);
+  assert.doesNotThrow(() => readTaskVgpuSkill("scene-quaternion-keyframes", {
+    skillPath, expectedSha256, expectedSceneSha256: sha256(sceneMarkdown),
+  }));
+});
+
+test("skill advertisement rejects missing or changed scene references", async () => {
+  const root = "/home/eve/.agents/skills/vgpu";
+  const markdown = "# vgpu\n";
+  const scene = "# Scenes\n";
+  for (const value of [null, "stale", scene]) {
+    const files = { [`${root}/SKILL.md`]: markdown };
+    if (value !== null) files[`${root}/scene.md`] = value;
+    const result = await observeSceneKeyframeSkillAdvertisement(
+      advertisementSandbox(files), sha256(markdown), sha256(scene),
+    );
+    assert.equal(result.advertised, value === scene);
+    assert.equal(result.integrity, value === scene ? "pass" : "infrastructure-error");
+    assert.equal(result.sceneReference.path, `${root}/scene.md`);
+    assert.equal(result.sceneReference.matches, value === scene);
+    assert.deepEqual(sceneKeyframeAdvertisementFields(result).sceneReference, result.sceneReference);
+  }
 });
 
 test("initial dependency provenance rejects direct, locked, installed, and transitive math", () => {

@@ -77,6 +77,9 @@ two-session pilot has [findings](scene-math-discovery-findings.md) and
 [machine-readable results](scene-math-discovery-results.json), including the separately retained
 infrastructure attempt.
 
+The follow-up with the split `SKILL.md` / `scene.md` has
+[findings](scene-skill-split-findings.md) and [results](scene-skill-split-results.json).
+
 ### s2-gradient
 
 `evals/s2-gradient.eval.ts` asks for a 128x128 horizontal gradient, pure red at

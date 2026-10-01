@@ -50,6 +50,7 @@ export default defineHook({
           ? await observeSceneKeyframeSkillAdvertisement(
               sandbox,
               process.env.VGPU_EVALS_VGPU_SKILL_SHA256 ?? "unavailable",
+              process.env.VGPU_EVALS_VGPU_SCENE_SKILL_SHA256 ?? "unavailable",
             )
           : null;
         const workspaceBytes = await captureWorkspaceTar(sandbox);
@@ -148,6 +149,12 @@ export interface SceneKeyframeSkillAdvertisementSnapshot {
   materializedPresent: boolean;
   materializedSha256: string | null;
   materializedOutsideWorkspace: boolean;
+  sceneReference: {
+    path: string | null;
+    expectedSha256: string;
+    sha256: string | null;
+    matches: boolean;
+  } | null;
   advertised: boolean;
   integrity: "pass" | "infrastructure-error";
   error: string | null;
@@ -156,6 +163,7 @@ export interface SceneKeyframeSkillAdvertisementSnapshot {
 export async function observeSceneKeyframeSkillAdvertisement(
   sandbox: SandboxSession,
   expectedFullMarkdownSha256: string,
+  expectedSceneSha256?: string,
 ): Promise<SceneKeyframeSkillAdvertisementSnapshot> {
   const checkedPaths: string[] = [];
   const errors: string[] = [];
@@ -205,9 +213,27 @@ export async function observeSceneKeyframeSkillAdvertisement(
       `materialized SKILL.md hash mismatch: expected ${expectedFullMarkdownSha256}, got ${materializedSha256}`,
     );
   }
+  let sceneReference: SceneKeyframeSkillAdvertisementSnapshot["sceneReference"] = null;
+  if (expectedSceneSha256 !== undefined) {
+    const path = materializedPath ? `${dirname(materializedPath)}/scene.md` : null;
+    let sceneMarkdown: string | null = null;
+    if (path) {
+      checkedPaths.push(path);
+      try {
+        sceneMarkdown = await sandbox.readTextFile({ path });
+      } catch (error) {
+        errors.push(`scene.md could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const sha256 = sceneMarkdown === null ? null : createHash("sha256").update(sceneMarkdown).digest("hex");
+    const matches = sha256 !== null && sha256 === expectedSceneSha256;
+    sceneReference = { path, expectedSha256: expectedSceneSha256, sha256, matches };
+    if (!matches) errors.push("materialized scene.md is missing or its hash does not match");
+  }
   const advertised = materializedPresent
     && materializedOutsideWorkspace
-    && materializedSha256 === expectedFullMarkdownSha256;
+    && materializedSha256 === expectedFullMarkdownSha256
+    && (sceneReference === null || sceneReference.matches);
   return {
     schemaVersion: 1,
     observedAt: new Date().toISOString(),
@@ -217,6 +243,7 @@ export async function observeSceneKeyframeSkillAdvertisement(
     materializedPresent,
     materializedSha256,
     materializedOutsideWorkspace,
+    sceneReference,
     advertised,
     integrity: advertised ? "pass" : "infrastructure-error",
     error: errors.length === 0 ? null : errors.join("; "),
