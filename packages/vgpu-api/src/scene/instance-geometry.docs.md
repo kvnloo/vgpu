@@ -158,7 +158,7 @@ const loop = frameLoop(gpu, (currentFrame) => {
 // call loop.stop() when your component unmounts
 ```
 
-A render bundle records the count it was given. Re-record the bundle when `publish()` returns a different count; changed row contents need no re-record, because replay reads the same instance buffer:
+A render bundle records the count it was given. Record a new bundle when `publish()` returns a different count; changed row contents need no new bundle, because replay reads the same instance buffer. Record the next bundle first, swap it in, then dispose the old one, so a recording that throws leaves the previous bundle in place:
 
 ```ts
 import { bundle, draw, frameLoop, geometry, init, surface, type Bundle } from "vgpu";
@@ -176,25 +176,39 @@ const crateDraw = draw(gpu, { shader: crateShader, geometry: crateBridge.geometr
 crateDraw.set({ camera: { viewProjection: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]) } });
 
 // ---cut---
+const crateSignature = { colors: [canvasSurface.format] }; // the surface's configuration, no canvas texture
 let crateBundle: Bundle | undefined;
 let recordedCount = -1;
 
-frameLoop(gpu, (currentFrame) => {
+function recordCrates(count: number): Bundle {
+  return bundle(gpu, { target: crateSignature, label: "crates" }, (recorder) => {
+    recorder.draw(crateDraw, { instances: count }); // the count is frozen into the bundle
+  });
+}
+
+const loop = frameLoop(gpu, (currentFrame) => {
   moveCrates(crates); // adds, removes and moves change rows; adds and removes change the count
   const crateCount = crateBridge.publish();
   if (crateCount !== recordedCount) {
+    const nextBundle = recordCrates(crateCount); // if this throws, crateBundle is untouched
+    const previousBundle = crateBundle;
+    crateBundle = nextBundle;
     recordedCount = crateCount;
-    crateBundle = bundle(gpu, { target: canvasSurface, label: "crates" }, (recorder) => {
-      recorder.draw(crateDraw, { instances: crateCount }); // the count is frozen into the bundle
-    });
+    previousBundle?.dispose(); // release the old count's bundle now
   }
   currentFrame.pass({ target: canvasSurface, clear: [0.05, 0.05, 0.08, 1] }, (pass) => {
     pass.bundles(crateBundle!);
   });
 });
+
+function teardown(): void { // call it when your component unmounts
+  loop.stop();
+  crateBundle?.dispose(); // the draw, bridge and base mesh stay usable
+  crateBridge.destroy();
+}
 ```
 
-The bundle is recorded inside the frame callback because recording against a `Surface` is only legal inside a frame.
+The bundle records against the surface's configuration signature, so it does not depend on the frame's canvas texture, and it keeps replaying when the canvas resizes. Dropping a replaced bundle also lets it be collected eventually; `dispose()` releases it at that point instead. Disposing a bundle never destroys `crateDraw`, the bridge or the base mesh.
 
 ## Notes
 
@@ -205,7 +219,7 @@ The bundle is recorded inside the frame callback because recording against a `Su
 - **Declare every name-matched input.** Instance attributes carry no explicit location, so all of them — `world0..world3` and each custom attribute — are matched by name and must be declared in every shader drawn with `bridge.geometry`, including depth-only or picking shaders that ignore them; a missing one throws `VGPU-MESH-ATTRIBUTE-UNMATCHED` when the draw is created. The same applies to named base attributes without a location. Recipe attributes (`position` at 0, `normal` at 1, `uv` at 2) have explicit locations and may still be omitted, as with any geometry, but their locations stay taken: two inputs on one location throw `VGPU-MESH-LOCATION-CONFLICT`, an input the geometry does not provide throws `VGPU-MESH-INPUT-MISSING`, and a type that does not match the format throws `VGPU-MESH-FORMAT-MISMATCH`.
 - **The shared shader input layout** for a `box()` bridge over `{ tint: "float32x3", kind: "uint32" }` is: `position: vec3f` and `normal: vec3f` from the base, then `world0: vec4f`, `world1: vec4f`, `world2: vec4f`, `world3: vec4f`, `tint: vec3f`, `kind: u32` from the instance stream. Declare the complete list in every shader that shares the bridge so all consumers read the same stream layout.
 - **The draw count is explicit.** Pass the value from `publish()` as `instances` on every `pass.draw()`, `drawable.draw()` or `recorder.draw()`. `0` is valid and draws nothing. Omitting `instances` falls back to the composed geometry's `instanceCount` of `0`, so the draw silently renders nothing. vgpu does not compare a caller-supplied `instances` count with the collection's `count` or `capacity`. Pass exactly the value `publish()` returned: any other count can address inactive or out-of-capacity instance indices, and the result is not defined by vgpu.
-- **Bundles capture the count.** A bundle freezes the `instances` value it was recorded with and the buffer it reads, not the row contents. Re-record it whenever the count from `publish()` changes; rows published later are what replay reads.
+- **Bundles capture the count.** A bundle freezes the `instances` value it was recorded with and the buffer it reads, not the row contents. Record a new one whenever the count from `publish()` changes — record next, swap, then `dispose()` the old bundle — and dispose the current one on teardown; rows published later are what replay reads.
 - **Frame order.** `app update → evaluate/read worlds → syncWorlds or setWorlds → camera matrices → publish → named uniform set → encode all passes → submit`. `publish()` never calls bound sources, evaluates nodes or hierarchies, or touches the camera, so everything before it must already be in the collection.
 - **One publication per frame per bridge.** `publish()` writes through the device queue, and a queue write lands before the next submit — before every pass of the frame being encoded, including passes encoded before the call. Do not publish a bridge again while passes that read it are still unsubmitted: the second write replaces what those passes read. Later frames are ordered by the queue, so publishing at the start of the next frame needs no wait for the GPU to go idle. If two passes in one frame need different instance contents, use separate bridges or separate collections — a second bridge mirrors the collection as of its own last `publish()`.
 - **What `publish()` costs.** Each call scans slots `0..count-1` for changes since this bridge's last successful publication — O(`count`) even when nothing changed — then copies each contiguous run of changed records out of the collection and writes it to the buffer. The first `publish()` writes every active record; a `publish()` with no changes in between writes 0 bytes; a swap-remove writes the moved record; removing the last slot writes nothing and only lowers the returned count. A collection with `capacity: 0` still gets a minimal 4-byte buffer; its `publish()` returns `0` and writes nothing.
@@ -213,7 +227,7 @@ The bundle is recorded inside the frame callback because recording against a `Su
 - **When `publish()` throws.** The bridge's cursor and returned count stay where they were, so nothing is lost: fix the cause and the next `publish()` writes every change still pending. Records written before the failure stay written and are written again. The write is not part of the frame's command buffer, so a frame that throws after `publish()` does not undo it; the uncaught error ends a `frameLoop(gpu)`.
 - **When a world source throws.** `syncWorlds()` throwing `VGPU-INSTANCE-SOURCE` leaves some worlds at this frame's values and others at the previous frame's, and there is no rollback. `publish()` uploads whatever the records hold, so recover before you publish: let the error end the frame, fix or `unbindWorld` the failing source, call `syncWorlds()` again, then `publish()`. The same applies to any synchronous failure in your own update or world-writing code.
 - **Ownership.** The bridge owns its instance buffer and the composed `bridge.geometry` wrapper; the base mesh stays yours. The bridge borrows the base's vertex buffers and index buffer, never destroys them, and sees later writes to them. Destroying the bridge leaves the base mesh usable.
-- **Lifetimes.** `bridge.destroy()` and `bridge.geometry.destroy()` share one destroyed state, and both are idempotent. `gpu.dispose()` destroys the bridge too. Once the bridge, its geometry or the base mesh is destroyed, `publish()`, creating or encoding a draw with `bridge.geometry` (direct, indexed, indirect or zero-instance), recording it into a bundle, and replaying a bundle that contains it all throw `VGPU-INSTANCE-DESTROYED` — also for draws compiled before the destruction. Destroying the base mesh does not free the bridge's instance buffer; call `bridge.destroy()` to release it. vgpu detects destruction through `Geometry.destroy()` only; destroying a raw `GPUBuffer` behind vgpu's back is not detected.
+- **Lifetimes.** `bridge.destroy()` and `bridge.geometry.destroy()` share one destroyed state, and both are idempotent. `gpu.dispose()` destroys the bridge too. Once the bridge, its geometry or the base mesh is destroyed, `publish()`, creating or encoding a draw with `bridge.geometry` (direct, indexed, indirect or zero-instance), recording it into a bundle, and replaying a bundle that contains it all throw `VGPU-INSTANCE-DESTROYED` — also for draws compiled before the destruction. Replaying a bundle you already disposed throws `VGPU-BUNDLE-DISPOSED` instead. Destroying the base mesh does not free the bridge's instance buffer; call `bridge.destroy()` to release it. vgpu detects destruction through `Geometry.destroy()` only; destroying a raw `GPUBuffer` behind vgpu's back is not detected.
 - **Anti-pattern:** `pass.draw(crateDraw)` without `instances` renders nothing. Always pass `{ instances: crateCount }`, where `crateCount` is the value this frame's `publish()` returned.
 - **Anti-pattern:** calling `publish()` between two passes of one frame to show each pass different rows. Both passes see the second publication; use two bridges.
 - **See also:** `InstanceGeometry`, `instances`, `InstanceCollection`, `geometry`, `draw`, `bundle`, `frame`, `frameLoop`, `instanceWorldMatrix` and `transformNormal` from `@vgpu/wgsl-std/scene`, [Scene composition](/guides/scene-composition).
@@ -251,7 +265,7 @@ interface InstanceGeometry {
 **Returns:** `publish()` returns the number of live instances to pass as `instances` — `0` when the collection is empty. `destroy()` returns `undefined`.
 
 **Throws:**
-- `VGPU-INSTANCE-DESTROYED` from `publish()` after `destroy()`, `geometry.destroy()`, `gpu.dispose()` or destruction of the base mesh; also from creating, encoding, recording or replaying a draw that uses `geometry` after any of those — create a new bridge from a live base mesh, then recreate the affected draws and re-record the affected bundles.
+- `VGPU-INSTANCE-DESTROYED` from `publish()` after `destroy()`, `geometry.destroy()`, `gpu.dispose()` or destruction of the base mesh; also from creating, encoding, recording or replaying a draw that uses `geometry` after any of those — create a new bridge from a live base mesh, then recreate the affected draws and re-record the affected bundles. Disposing an affected bundle does not throw; it only releases the bundle.
 - `VGPU-INSTANCE-REENTRANT` from `publish()` when a bound world source calls it during `syncWorlds()` — keep sources read-only and publish after `syncWorlds()` returns. `syncWorlds()` rethrows this error unwrapped.
 - Errors from writing the instance buffer propagate unchanged; the bridge's cursor does not advance, so the next `publish()` retries every pending change.
 - Collection errors (`VGPU-INSTANCE-SOURCE`, `VGPU-INSTANCE-VALUE`, `VGPU-INSTANCE-CAPACITY` and the rest) come from the collection methods that caused them, never from `publish()`, and keep their original code, path and fix — see `InstanceCollection`.
