@@ -24,6 +24,7 @@ interface Gpu {
   readonly disposed: boolean;
   dispose(): void;
   onError(cb: GpuErrorListener): () => void;
+  /** Resolves once the queue work, error deliveries, and in-flight sources captured at call time complete. Never rejects; not a success signal. */
   settled(): Promise<void>;
 }
 
@@ -89,7 +90,7 @@ declare function clock(gpu: Gpu): Clock;
 | onError.cb | `GpuErrorListener` | ✔ | — | Receives asynchronous vgpu errors; returns an unsubscribe function. |
 | clock | — | — | — | No parameters. The frame clock of this gpu: `{ time, deltaTime, frameCount, advance(dtSeconds) }`, one instance per gpu. See `Clock`. |
 
-**Returns:** each factory returns the resource named in its signature. `dispose()` returns `void`. Frame callbacks are synchronous: a non-thenable return value is ignored.
+**Returns:** each factory returns the resource named in its signature. `dispose()` returns `void`. Frame callbacks are synchronous: a non-thenable return value is ignored. `onError(cb)` returns its unsubscribe function. `settled()` returns a `Promise<void>` that always fulfills — see "Wait for submitted work" below.
 
 **Throws:** `VGPU-GPU-DISPOSED` when any factory (or `clock(gpu)`) runs after `gpu.dispose()` — the device and everything it owned are gone, so the handle it would return could only fail later; create resources before disposing, or `init()` a new gpu; `VGPU-GPU-FOREIGN` when the first argument was not created by `init()` (a plain object, a `GPUDevice`, a gpu from another library): it carries no vgpu kernel, so pass the object returned by `init()` from `vgpu`, `vgpu/node` or `vgpu/mock`; `VGPU-LIMIT-STORAGE-VERTEX` / `VGPU-LIMIT-STORAGE-FRAGMENT` when a selected render entry exceeds its granted storage-buffer limit. The structured detail reports `stage`, `entryPoint`, `count`, `limit`, and each counted binding's `name`, `group`, and `binding`; request a supported limit or reduce/move the data; `VGPU-SHADER-SOURCE-INVALID` for malformed `ShaderSource`; `VGPU-SET-VALUE-INVALID` when a JS-owned buffer value does not exactly match its reflected WGSL shape, integer range, or runtime extent; `VGPU-SET-TEXTURE-FILTERABILITY` when a known facade texture format cannot satisfy an ordinarily sampled float binding (detail reports format, texture binding/name/label, and paired sampler identity); `VGPU-RING1-UNSUPPORTED` for unsupported effect/compute/target cases; `VGPU-TARGET-REQUIRED` when one-shot drawing needs an explicit target; `VGPU-TARGET-SIZE-REQUIRED` for runtime JS calls to `target(gpu)` without `size`; `VGPU-SURFACE-*` errors from `surface()`, surface resize, surface readback, or using disposed surfaces; `VGPU-ASYNC-FRAME-CALLBACK` when a `frame(gpu, cb)` / `frameLoop(gpu, cb)` callback returns a thenable — the open frame is canceled before its implicit submit, so await preparation before `frame()`/`frameLoop()` and keep the frame callback synchronous; plus method-specific `VGPU-R1-*`, `VGPU-R3-*`, and `VGPU-R4-*` errors documented on `Effect`, `Draw`, `Compute`, `Frame`, `Bundle`, `Target`, and `SharedUniforms`.
 
@@ -135,7 +136,90 @@ frameLoop(gpu, (frame) => {
 
 `gpu.onError(cb)` subscribes to asynchronous vgpu errors and returns an unsubscribe function. Listeners run in subscription order; removing one stops future deliveries; a throwing listener is reported to `console.error` without stopping the rest. If no listener is registered, vgpu reports the error to `console.error` by default.
 
-`gpu.settled()` resolves after the current snapshot of pending error deliveries and in-flight pipeline work settles. This includes compute compilation and native compute validation through error delivery. It never rejects, so it is safe for deterministic tests and teardown. It is not a successful-execution assertion: await a pipeline’s `compile()` to handle compilation rejection and subscribe to `onError` for asynchronous execution failures.
+`gpu.settled()` resolves after the work captured when you call it completes: GPU queue work already submitted, pending error deliveries, and in-flight pipeline work. This includes compute compilation and native compute validation through error delivery, so `onError` listeners for those failures have already run when it fulfills. It never rejects, so it is safe for deterministic tests and teardown. It is not a successful-execution assertion: await a pipeline’s `compile()` to handle compilation rejection and subscribe to `onError` for asynchronous execution failures.
+
+## Wait for submitted work
+
+`settled()` takes a snapshot synchronously, before it awaits anything, and waits for exactly that snapshot:
+
+- **Submitted queue work.** While the gpu is active, the call captures a WebGPU `queue.onSubmittedWorkDone()` fence. It covers everything already submitted to the device queue: `frame(gpu, cb)` callbacks that returned, `frame.submit()`, one-shot `drawable.draw(target)` and `compute.dispatch()` calls, and raw `gpu.gpu.queue.submit()` calls on the same queue.
+- **Pending error deliveries** queued for `onError`.
+- **In-flight sources** tracked by vgpu at call time, such as pipeline compilation and native validation. Errors these sources report through `onError` are delivered before the call fulfills.
+
+Work that starts after the call returns does not extend it: later submissions, new pipelines, and deliveries unrelated to the captured sources belong to the next `settled()` call. A manual `frame(gpu)` that is still open — not yet submitted or cancelled — is not queue work, so `settled()` neither waits for it nor submits it.
+
+```ts
+import { init, draw, target } from "vgpu/mock";
+
+const gpu = await init();
+const colorTarget = target(gpu, { size: [64, 64] });
+const triangle = draw(gpu, {
+  shader: `
+    @vertex fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+      var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+      return vec4f(p[vi], 0, 1);
+    }
+    @fragment fn fs_main() -> @location(0) vec4f { return vec4f(1, 0.5, 0, 1); }
+  `,
+});
+
+// ---cut---
+triangle.draw(colorTarget); // one-shot draw: encodes and submits immediately
+const drawDone = gpu.settled(); // captures the queue fence for that submission now
+triangle.draw(colorTarget); // submitted after the call — not part of drawDone
+await drawDone;
+```
+
+`drawDone` fulfills once the first submission completes on the GPU. The second draw is outside its snapshot; call `settled()` again to wait for it.
+
+Because `settled()` waits for the GPU to finish queued work, it can take as long as that work takes — longer than awaiting deliveries and pipelines alone. Fulfillment means completion, not success: a failed submission, an invalid pipeline, or a lost device still fulfills it, and failures stay on their existing channels.
+
+- `settled()` never rejects and never reports an error of its own. When the queue has no `onSubmittedWorkDone()` method (some mocks), the method throws synchronously, or its promise rejects, `settled()` skips that fence and still fulfills — `onError` receives nothing extra.
+- A pipeline's `compile()` rejection stays on that `compile()` promise. `settled()` waits for the compilation without turning its rejection into an `onError` delivery; handle rejection on the `compile()` promise itself.
+- Asynchronous execution and validation failures arrive once, through `onError`, whether or not you await `settled()`.
+
+### After device loss or `dispose()`
+
+When vgpu has already observed device loss, or `gpu.dispose()` already ran, `settled()` creates no new queue fence: there is no usable queue to wait on. It still waits for the deliveries and sources vgpu is tracking at that moment. `dispose()` stops tracking in-flight pipeline compilations as part of normal teardown, so after `dispose()` the call waits only for deliveries that were already pending.
+
+Loss or disposal that happens after the call does not shorten it: a fence and sources already captured keep their wait. `settled()` does not wait for device loss, and it does not restart or recover a lost device.
+
+### Choose compile, settled, or readback
+
+Await only the promise that answers your question:
+
+| You need | Await | What it waits for |
+|---|---|---|
+| A pipeline ready before its first frame, or its compilation failure as a rejection | `drawable.compile(target)`, `fullscreenEffect.compile(target)`, `simulation.compile()` | That one pipeline. Rejects on compilation failure. |
+| The pixels or bytes a GPU pass produced | `colorTarget.color.read({ mipLevel: 0, region: "all" })`, `colorTarget.color.readFloats({ mipLevel: 0, region: "all" })`, `particles.read()` on a `StorageBuffer` | The copy it issues, which runs after the work that wrote the resource. |
+| Submitted queue work and tracked asynchronous work to finish: before assertions on `onError`, between tests, before teardown | `gpu.settled()` | The call-time snapshot above. Never rejects. |
+
+If you only need pixels or bytes, await the readback directly: its copy is ordered after earlier queue work. Await `settled()` separately when you also need its tracked error deliveries or pipeline work. Keep these waits outside frame callbacks; waiting after every frame serializes encoding with GPU completion and reduces the overlap between CPU encoding and GPU execution.
+
+### Teardown
+
+Subscribe to `onError` for asynchronous failures, await `compile()` for compilation failures, then `await gpu.settled()` before `gpu.dispose()` so submitted work and pending deliveries finish first:
+
+```ts
+import { init, effect, frame, target } from "vgpu/mock";
+
+const gpu = await init();
+const errors: string[] = [];
+gpu.onError((error) => errors.push(error.code)); // asynchronous failures arrive here, once
+
+const colorTarget = target(gpu, { size: [64, 64] });
+const tint = await effect(gpu, `@fragment fn fs_main() -> @location(0) vec4f { return vec4f(0.2, 0.4, 1.0, 1.0); }`).compile(colorTarget); // compilation failures reject here
+
+frame(gpu, (currentFrame) => {
+  currentFrame.pass({ target: colorTarget, clear: [0, 0, 0, 1] }, (pass) => pass.draw(tint));
+});
+
+await gpu.settled(); // the submitted frame and pending deliveries have completed
+console.log(errors); // every error reported for that work has been delivered
+gpu.dispose();
+```
+
+`settled()` fulfills even if the frame failed; read `errors` to find out. `dispose()` is the teardown signal — it stops loops and releases resources; do not wait for device loss to tear down a gpu you own. For a gpu from `initFromDevice(device)`, `dispose()` releases the vgpu wrapper and leaves the borrowed device to its owner.
 
 ## Notes
 
