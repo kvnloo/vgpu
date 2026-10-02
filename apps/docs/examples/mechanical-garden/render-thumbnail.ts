@@ -25,7 +25,7 @@ export async function renderThumbnail(gpu: Gpu, output: Target, _options: Option
   try {
     const colony = createColony({ seed: DEFAULT_SEED, count: PRESETS[DEFAULT_PRESET].count });
     setDestination(colony, THUMB_DESTINATION[0], THUMB_DESTINATION[1]);
-    Object.assign(colony.brush, { active: true, mode: "raise", x: THUMB_MOUND.x, z: THUMB_MOUND.z, radius: 1.2, strength: 0.45 });
+    Object.assign(colony.brush, { active: true, mode: "elevate", x: THUMB_MOUND.x, z: THUMB_MOUND.z, radius: 1.2, strength: 0.45 });
     for (let index = 0; index < THUMB_STEPS; index++) {
       if (index === THUMB_MOUND.steps) colony.brush.active = false;
       step(colony);

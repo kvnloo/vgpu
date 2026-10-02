@@ -10,7 +10,6 @@ import {
   createColony,
   DEFAULT_PRESET,
   DEFAULT_SEED,
-  FIXED_DT,
   MAX_ROBOTS,
   PRESETS,
   readStats,
@@ -23,9 +22,11 @@ import {
   type ColonyStats,
   type PresetName,
 } from "./colony";
-import { installInput, TOOLS, type GardenInput, type Tool } from "./input";
+import { installInput, isEditTool, type GardenInput, type Tool } from "./input";
 import { createPipeline, type BrushOverlay, type GardenPipeline } from "./pipeline";
-import { BRUSH_RADIUS, BRUSH_STRENGTH, HALF, raycast } from "./terrain";
+import { LEG_COUNT } from "./robot";
+import { raycast } from "./terrain";
+import { COMPACT_WIDTH, createToolbar, type Toolbar } from "./toolbar";
 
 interface RendererOptions {
   readonly canvas: HTMLCanvasElement;
@@ -41,8 +42,6 @@ export interface Settings {
   tool: Tool;
   radius: number;
   strength: number;
-  cursorX: number;
-  cursorZ: number;
   follow: boolean;
   autoOrbit: boolean;
   debug: boolean;
@@ -50,15 +49,8 @@ export interface Settings {
 
 const IDLE_ORBIT_SPEED = 0.05;
 const CAMERA_TIME_CONSTANT = 0.12;
-const NARROW_WIDTH = 640;
 const SHORT_HEIGHT = 560;
 const GUI_WIDTH = 236;
-/**
- * A GUI "raise/lower at cursor" press sculpts for this many fixed simulation steps (0.5 s of
- * simulated time). Every step that runs consumes one, including manual Step while paused, so a
- * pulse fired while paused ends after the same amount of sculpting as a running one.
- */
-export const PULSE_STEPS = Math.round(0.5 / FIXED_DT);
 const STATS_INTERVAL = 0.5;
 /** Calm defaults under prefers-reduced-motion (the user can still change both). */
 export const REDUCED_PACE = 0.45;
@@ -73,6 +65,7 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
   let pipeline: GardenPipeline | undefined;
   let input: GardenInput | undefined;
   let gui: GUI | undefined;
+  let toolbar: Toolbar | undefined;
   let loop: { stop(): void } | undefined;
   let unsubscribeResize: (() => void) | undefined;
   const goal: OrbitRig = orbitRig(VIEWS[DEFAULT_PRESET]);
@@ -89,6 +82,8 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
   const onPointerLeave = () => {
     hovered = false;
   };
+  // A press must not outlive the window's focus (a dragged-out pointer, an alt-tab mid-sculpt).
+  const onWindowBlur = () => input?.cancel();
 
   function dispose(): void {
     if (disposed) return;
@@ -99,7 +94,9 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
       () => onMotionChange && motion?.removeEventListener("change", onMotionChange),
       () => hoverTarget.removeEventListener("pointerenter", onPointerEnter),
       () => hoverTarget.removeEventListener("pointerleave", onPointerLeave),
+      () => window.removeEventListener("blur", onWindowBlur),
       () => input?.dispose(),
+      () => toolbar?.dispose(),
       () => gui?.destroy(),
       () => gpu?.dispose(),
     ]);
@@ -170,23 +167,16 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
       tool: "orbit",
       radius: garden.brush.radius,
       strength: garden.brush.strength,
-      cursorX: 0,
-      cursorZ: 0,
       follow: false,
       autoOrbit: !reducedMotion,
       debug: false,
     };
     garden.pace = settings.pace;
-    // A GUI sculpt press runs for PULSE_STEPS fixed steps.
-    const pulse = { mode: "raise" as "raise" | "lower", steps: 0 };
-    /** The sculpt mode right now: a pending GUI pulse, else the tool. The aim overlay reads it too. */
-    const brushMode = () => (pulse.steps > 0 ? pulse.mode : settings.tool === "lower" ? "lower" : "raise");
-    /** The brush for the next fixed step: the pointer or Enter/Space in a sculpt tool, or a GUI pulse. */
-    const updateBrush = () => {
+    /** The brush for the next fixed step: a press of the elevate or lower tool (pointer or Enter/Space). */
+    const beforeStep = () => {
       const pressed = input?.cursor.pressed ?? false;
-      const sculptTool = settings.tool === "raise" || settings.tool === "lower";
-      garden.brush.mode = brushMode();
-      garden.brush.active = pulse.steps > 0 || (sculptTool && pressed);
+      garden.brush.mode = settings.tool === "lower" ? "lower" : "elevate";
+      garden.brush.active = (settings.tool === "elevate" || settings.tool === "lower") && pressed;
       if (input) {
         garden.brush.x = input.cursor.x;
         garden.brush.z = input.cursor.z;
@@ -194,13 +184,8 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
       garden.brush.radius = settings.radius;
       garden.brush.strength = settings.strength;
     };
-    /** Runs before every fixed step, manual or clocked: set the brush, then use up one pulse step. */
-    const beforeStep = () => {
-      updateBrush();
-      pulse.steps = Math.max(0, pulse.steps - 1);
-    };
 
-    gui = new GUI({ title: "Mechanical Garden", container, width: GUI_WIDTH });
+    gui = new GUI({ title: "Settings", container, width: GUI_WIDTH });
     const short = (container?.clientHeight ?? SHORT_HEIGHT) < SHORT_HEIGHT;
     const controls = configureGui(gui, settings, short, {
       preset: (preset) => guard(() => {
@@ -213,7 +198,7 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
       robots: (count) => guard(() => setCount(garden, count)),
       reset: () => guard(() => {
         reset(garden, settings.seed, garden.count);
-        pulse.steps = 0;
+        input?.cancel();
         controls.sync();
       }),
       pause: (paused) => {
@@ -229,29 +214,29 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
       pace: (pace) => {
         garden.pace = pace;
       },
-      cursor: () => {
-        if (!input) return;
-        input.cursor.x = settings.cursorX;
-        input.cursor.z = settings.cursorZ;
-      },
-      sculpt: (mode) => {
-        pulse.mode = mode;
-        pulse.steps = PULSE_STEPS;
-      },
-      destination: () => guard(() => setDestination(garden, settings.cursorX, settings.cursorZ)),
-      clearDestination: () => guard(() => clearDestination(garden)),
       home: () => applyView(goal, settings.preset, aspect()),
     });
-    if ((container?.clientWidth ?? NARROW_WIDTH) < NARROW_WIDTH) gui.close();
+    // The same breakpoint docks the tool bar to the bottom, so the two never share the top edge.
+    if ((container?.clientWidth ?? COMPACT_WIDTH) < COMPACT_WIDTH) gui.close();
+
+    /**
+     * Tools are exclusive: switching drops any press in flight, and an edit tool holds the camera
+     * where it is (idle orbit and follow pause until Orbit is picked again).
+     */
+    const setTool = (tool: Tool) => {
+      if (tool === settings.tool) return;
+      settings.tool = tool;
+      input?.cancel();
+      toolbar?.setTool(tool);
+      if (isEditTool(tool)) copyRig(goal, current);
+      controls.editing(isEditTool(tool));
+    };
 
     input = installInput(canvas, goal, {
       tool: () => settings.tool,
       pick,
       onDestination: (x, z) => guard(() => setDestination(garden, x, z)),
-      onTool: (tool) => {
-        settings.tool = tool;
-        controls.sync();
-      },
+      onTool: setTool,
       onPause: () => {
         settings.paused = !settings.paused;
         garden.paused = settings.paused;
@@ -259,6 +244,30 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
       },
       onStep: controls.actions.step,
     });
+    if (container) {
+      const panel = gui.domElement;
+      const touch = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+      toolbar = createToolbar(container, {
+        tool: settings.tool,
+        radius: settings.radius,
+        strength: settings.strength,
+        touch,
+        before: gui.domElement,
+        onTool: setTool,
+        onRadius: (radius) => {
+          settings.radius = radius;
+        },
+        onStrength: (strength) => {
+          settings.strength = strength;
+        },
+        onClearDestination: () => guard(() => clearDestination(garden)),
+        // Docked at the bottom, Settings scrolls in the space above the bar instead of covering it.
+        onDock: (height) => {
+          panel.style.maxHeight = height === null ? "calc(100% - 16px)" : `calc(100% - ${height + 24}px)`;
+        },
+      });
+    }
+    window.addEventListener("blur", onWindowBlur);
     hoverTarget.addEventListener("pointerenter", onPointerEnter);
     hoverTarget.addEventListener("pointerleave", onPointerLeave);
     // Reduced motion sets calm defaults; a value the user changed is theirs and survives.
@@ -279,6 +288,7 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
       guard(() => {
         if (!output || !pipeline) return;
         pipeline.resize(output.size, pixelRatio());
+        toolbar?.layout(container?.clientWidth ?? canvas.clientWidth);
         if (!framed && output.size[0] > 0 && output.size[1] > 0) {
           framed = true;
           applyView(goal, settings.preset, aspect());
@@ -296,8 +306,6 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
     let terrainTotal = pipeline.counters.terrainBytes;
     let rigTotal = pipeline.counters.rigRows;
     let simMs = 0;
-    let lastCursorX = Number.NaN;
-    let lastCursorZ = Number.NaN;
     loop = frameLoop(gpu, (currentFrame) => {
       guard(() => {
         if (disposed || !output || !pipeline || !input || !gui) return;
@@ -308,23 +316,26 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
         const ran = advance(garden, dt, beforeStep);
         if (ran > 0) simMs += ((performance.now() - started) / ran - simMs) * 0.1;
 
-        // Camera: follow robot 0, idle orbit when nobody is interacting, then glide.
+        // Camera: in the orbit tool, follow robot 0 and idle-orbit when nobody is interacting; an
+        // edit tool holds it still. Then glide.
+        const editing = isEditTool(settings.tool);
         const guiFocused = gui.domElement.matches(":focus-within");
-        if (settings.follow && garden.count > 0) followRobot(goal, garden.robots[0]!);
-        if (settings.autoOrbit && !hovered && !input.engaged && !guiFocused && document.activeElement !== canvas) {
+        if (!editing && settings.follow && garden.count > 0) followRobot(goal, garden.robots[0]!);
+        if (!editing && settings.autoOrbit && !hovered && !input.engaged && !guiFocused && document.activeElement !== canvas) {
           goal.yaw += dt * IDLE_ORBIT_SPEED;
         }
         smoothRig(current, goal, dt, { timeConstant: reducedMotion ? 0.02 : CAMERA_TIME_CONSTANT });
         pipeline.updateCamera(current);
 
-        const aiming = pulse.steps > 0 || cursor.visible || (guiFocused && sculptFocused(gui));
+        const aiming = editing && (cursor.visible || (toolbar?.adjusting ?? false));
         brush[0] = cursor.x;
         brush[1] = cursor.z;
         brush[2] = settings.radius;
-        // Style: off, destination marker (2), or the sculpt mode a pending pulse or the tool sets.
-        const marker = settings.tool === "destination" && pulse.steps === 0;
-        brush[3] = !aiming ? 0 : marker ? 2 : brushMode() === "lower" ? -1 : 1;
+        // Style: off, destination marker (2), or the sculpt direction of the tool.
+        brush[3] = !aiming ? 0 : settings.tool === "destination" ? 2 : settings.tool === "lower" ? -1 : 1;
         if (brush[3] === 2) brush[2] = 0.3;
+        toolbar?.setDestination(garden.destination.active);
+        toolbar?.setPaused(settings.paused);
         renderTime += dt * (reducedMotion ? REDUCED_TIME_SCALE : 1);
         pipeline.render(currentFrame, output, { time: renderTime, brush, debug: settings.debug });
 
@@ -333,10 +344,6 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
           const interval = statsAge;
           statsAge = 0;
           readStats(garden, stats);
-          if (cursor.x !== lastCursorX || cursor.z !== lastCursorZ) {
-            lastCursorX = settings.cursorX = cursor.x;
-            lastCursorZ = settings.cursorZ = cursor.z;
-          }
           // Rates over the readout interval (measured on the same clamped dt).
           const { counters } = pipeline;
           uploads.instances = counters.instances;
@@ -358,9 +365,12 @@ export function createRenderer({ canvas, container = canvas.parentElement ?? und
   return { ready, dispose };
 }
 
-function sculptFocused(gui: GUI): boolean {
-  const folder = gui.folders.find((child) => child._title === "Sculpt");
-  return Boolean(folder?.domElement.matches(":focus-within"));
+function copyRig(out: OrbitRig, rig: OrbitRig): void {
+  out.target.set(rig.target);
+  out.pan.set(rig.pan);
+  out.yaw = rig.yaw;
+  out.pitch = rig.pitch;
+  out.distance = rig.distance;
 }
 
 /** Upload readouts: the last frame's instance count, and per-second terrain bytes and robot part rows. */
@@ -377,17 +387,13 @@ export interface GuiActions {
   pause(paused: boolean): void;
   step(): void;
   pace(pace: number): void;
-  cursor(): void;
-  sculpt(mode: "raise" | "lower"): void;
-  destination(): void;
-  clearDestination(): void;
   home(): void;
 }
 
 /**
- * lil-gui is also the keyboard and touch path for everything the pointer does: pick a tool, move
- * the cursor, sculpt or send the robots there. `touched` records settings the user changed (reduced
- * motion leaves those alone); `stats` refreshes the read-only counters.
+ * lil-gui holds the advanced and debug settings only; the tools live in the tool bar. `touched`
+ * records settings the user changed (reduced motion leaves those alone); `editing` greys out the
+ * camera options an edit tool suspends; `stats` refreshes the read-only counters.
  */
 export function configureGui(
   gui: GUI,
@@ -398,6 +404,7 @@ export function configureGui(
   readonly touched: Set<keyof Settings>;
   readonly actions: { step(): void };
   sync(): void;
+  editing(editing: boolean): void;
   stats(stats: ColonyStats, simMs: number, colony: Colony, uploads: UploadRates): void;
 } {
   Object.assign(gui.domElement.style, {
@@ -420,10 +427,6 @@ export function configureGui(
   const actions = {
     step: handlers.step,
     reset: handlers.reset,
-    raise: () => handlers.sculpt("raise"),
-    lower: () => handlers.sculpt("lower"),
-    destination: handlers.destination,
-    clear: handlers.clearDestination,
     home: handlers.home,
   };
   scene.add(actions, "step").name("step once");
@@ -435,20 +438,9 @@ export function configureGui(
   keep(scene.add(settings, "seed", 1, 9999, 1).name("seed"));
   scene.add(actions, "reset").name("reset to seed");
 
-  const sculpt = gui.addFolder("Sculpt");
-  keep(sculpt.add(settings, "tool", [...TOOLS]).name("tool"));
-  keep(sculpt.add(settings, "radius", BRUSH_RADIUS.min, BRUSH_RADIUS.max, 0.05).name("brush radius"));
-  keep(sculpt.add(settings, "strength", BRUSH_STRENGTH.min, BRUSH_STRENGTH.max, 0.05).name("brush strength"));
-  keep(sculpt.add(settings, "cursorX", -HALF + 0.3, HALF - 0.3, 0.05).name("cursor x").decimals(2)).onChange(handlers.cursor);
-  keep(sculpt.add(settings, "cursorZ", -HALF + 0.3, HALF - 0.3, 0.05).name("cursor z").decimals(2)).onChange(handlers.cursor);
-  sculpt.add(actions, "raise").name("raise at cursor");
-  sculpt.add(actions, "lower").name("lower at cursor");
-  sculpt.add(actions, "destination").name("walk to cursor");
-  sculpt.add(actions, "clear").name("clear destination");
-
   const view = gui.addFolder("Camera");
-  keep(view.add(settings, "follow").name("follow robot 1"));
-  keep(view.add(settings, "autoOrbit").name("idle orbit")).onChange(touch("autoOrbit"));
+  const follow = keep(view.add(settings, "follow").name("follow robot 1"));
+  const idleOrbit = keep(view.add(settings, "autoOrbit").name("idle orbit")).onChange(touch("autoOrbit"));
   view.add(actions, "home").name("reset view");
 
   const debug = gui.addFolder("Debug");
@@ -466,7 +458,7 @@ export function configureGui(
     statsFolder.add(readout, "rejected").name("rejected solves"),
     statsFolder.add(readout, "sim").name("simulation (CPU)"),
     statsFolder.add(readout, "dropped").name("dropped steps"),
-    // Instances in the last colour pass (robot parts, scenery, plinth); terrain vertex bytes and
+    // Instances in the last colour pass (robot parts and plinth); terrain vertex bytes and
     // robot part rows sent to the GPU per second. Both uploads are change-tracked: a paused,
     // unsculpted garden uploads nothing.
     statsFolder.add(readout, "instances").name("instances drawn"),
@@ -478,11 +470,8 @@ export function configureGui(
   view.close();
   debug.close();
   statsFolder.close();
-  // Short frames (the gallery's 16:9 frame) start with every folder closed: six headers, no cover.
-  if (compact) {
-    scene.close();
-    sculpt.close();
-  }
+  // Short frames (the gallery's 16:9 frame) start with every folder closed: four headers, no cover.
+  if (compact) scene.close();
 
   return {
     touched,
@@ -490,9 +479,13 @@ export function configureGui(
     sync() {
       for (const controller of controllers) controller.updateDisplay();
     },
+    editing(editing) {
+      follow.enable(!editing);
+      idleOrbit.enable(!editing);
+    },
     stats(stats, simMs, colony, uploads) {
-      readout.swinging = `${stats.swinging} of ${stats.robots * 6}`;
-      // The scene has no physical scale: distances are world units (a femur is 0.34, the tile 15 across).
+      readout.swinging = `${stats.swinging} of ${stats.robots * LEG_COUNT}`;
+      // The scene has no physical scale: distances are world units (a femur is 0.3, the tile 15 across).
       readout.speed = `${stats.meanSpeed.toFixed(2)} units/s`;
       readout.residual = `${stats.worstResidual.toExponential(1)} units`;
       readout.rejected = `${stats.rejected}`;
@@ -502,10 +495,6 @@ export function configureGui(
       readout.terrain = `${(uploads.terrainBytes / 1024).toFixed(1)} KB/s`;
       readout.rig = `${Math.round(uploads.rigRows)} rows/s`;
       for (const controller of readouts) controller.updateDisplay();
-      for (const controller of controllers) {
-        // Cursor sliders follow the pointer; other values only change through their own controls.
-        if (controller.property === "cursorX" || controller.property === "cursorZ") controller.updateDisplay();
-      }
     },
   };
 }

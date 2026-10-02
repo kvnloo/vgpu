@@ -1,5 +1,4 @@
 import { pcg2d, unitFloat } from "@vgpu/wgsl-std/hash";
-import { voronoi2d } from "@vgpu/wgsl-std/noise";
 import { fbmSimplex2d } from "@vgpu/wgsl-std/noise/simplex";
 import { saturate } from "@vgpu/wgsl-std/math";
 import { Camera, Scene, Surface, finish, lightSurface, sunShadow } from "./common.wgsl";
@@ -10,7 +9,8 @@ import { Camera, Scene, Surface, finish, lightSurface, sunShadow } from "./commo
 @group(0) @binding(3) var shadowSampler: sampler_comparison;
 
 const CONTOUR_SPACING: f32 = 0.08;
-const GLAZE_LINE: f32 = -0.07;
+// Painted grid pitch on the deck (world units).
+const GRID_SPACING: f32 = 1.0;
 
 struct TerrainInput {
   @location(0) position: vec3f,
@@ -36,17 +36,22 @@ fn vs_main(input: TerrainInput) -> TerrainVarying {
   return output;
 }
 
-/** Round iron speckle: a few cells in a jittered grid carry one anti-aliased dot. */
-fn speckle(position: vec2f, scale: f32) -> f32 {
-  let scaled = position * scale;
-  let cell = vec2u(vec2i(floor(scaled) + vec2f(8192.0)));
-  let h = pcg2d(cell);
-  let pick = unitFloat(pcg2d(cell + vec2u(7u, 3u)).x);
-  let centre = vec2f(unitFloat(h.x), unitFloat(h.y)) * 0.6 + 0.2;
-  let radius = mix(0.06, 0.14, pick * pick);
-  let distance = length(fract(scaled) - centre);
-  let aa = max(fwidth(scaled.x), 1e-4);
-  return (1.0 - smoothstep(radius - aa, radius + aa, distance)) * step(0.82, pick);
+/** Fine aggregate in the concrete: one value per small cell, faded out when cells shrink below a pixel. */
+fn aggregate(position: vec2f, scale: f32, footprint: f32) -> f32 {
+  let cell = vec2u(vec2i(floor(position * scale) + vec2f(8192.0)));
+  let value = unitFloat(pcg2d(cell).x) - 0.5;
+  return value * (1.0 - smoothstep(0.3, 1.0, footprint * scale));
+}
+
+/** Anti-aliased lines every `spacing` world units in x and z, `half` wide. */
+fn gridLines(position: vec2f, spacing: f32, half: f32) -> f32 {
+  let scaled = position / spacing;
+  let distance = abs(fract(scaled + 0.5) - 0.5) * spacing;
+  let footprint = max(fwidth(position), vec2f(1e-4));
+  let lines = 1.0 - smoothstep(vec2f(half) - footprint, vec2f(half) + footprint, distance);
+  // Fade lines whose width falls below a pixel instead of letting them alias.
+  let visible = saturate(half * 2.0 / max(footprint.x, footprint.y));
+  return max(lines.x, lines.y) * visible;
 }
 
 /** Anti-aliased ring of half-width `half` (world units) at `radius` around `centre`. */
@@ -77,20 +82,11 @@ fn fs_main(input: TerrainVarying) -> @location(0) vec4f {
   let n = normalize(input.normal);
   let footprint = max(fwidth(p.x), fwidth(p.z));
 
-  // Stoneware bisque on the crests, a cool celadon glaze pooling in the hollows.
-  let tone = fbmSimplex2d(p.xz * 0.9, 3, 2.1, 0.5) * 0.5 + 0.5;
-  let bisque = mix(vec3f(0.14, 0.112, 0.082), vec3f(0.2, 0.162, 0.118), tone * 0.65 + saturate(p.y * 1.5) * 0.35);
-  let glaze = vec3f(0.03, 0.085, 0.078);
-  // The glaze runs below a fixed line, so lowered ground fills with celadon pools.
-  let pooled = (GLAZE_LINE - p.y) * 9.0 + input.cavity * 1.2;
-  let glazed = smoothstep(0.0, 0.5, pooled);
-  // Crackle: the fine craze lines of a fired glaze, only inside the pools.
-  let craze = voronoi2d(p.xz * 15.0);
-  let edge = craze.f2 - craze.f1;
-  let crackle = (1.0 - smoothstep(0.0, max(fwidth(edge) * 1.5, 0.03), edge)) * (1.0 - smoothstep(0.004, 0.02, footprint));
-  var albedo = mix(bisque, glaze * (1.0 - crackle * 0.3), glazed);
-  // Iron speckle fired into the clay (it sinks under the glaze).
-  albedo *= 1.0 - speckle(p.xz, 14.0) * 0.6 * (1.0 - glazed * 0.7);
+  // Light gray troweled concrete: broad tonal mottling, fine aggregate, a faint painted 1 m grid.
+  let tone = fbmSimplex2d(p.xz * 0.45, 3, 2.1, 0.5) * 0.5 + 0.5;
+  var albedo = vec3f(0.36, 0.36, 0.352) * (0.9 + 0.16 * tone);
+  albedo *= 1.0 + aggregate(p.xz, 90.0, footprint) * 0.12;
+  albedo *= 1.0 - gridLines(p.xz, GRID_SPACING, 0.008) * 0.22;
 
   // Faint contour lines incised every CONTOUR_SPACING of height.
   let level = p.y / CONTOUR_SPACING;
@@ -98,10 +94,17 @@ fn fs_main(input: TerrainVarying) -> @location(0) vec4f {
   let contour = 1.0 - smoothstep(0.0, lineFootprint * 1.2, abs(fract(level + 0.5) - 0.5));
   albedo *= 1.0 - contour * 0.16 * (1.0 - smoothstep(0.02, 0.2, footprint));
 
-  var surface = Surface(albedo, vec3f(0.04), mix(14.0, 110.0, glazed), 1.0, vec3f(0.0));
+  // Hillshade: the floor sits on the tone-mapping shoulder, where plain lighting flattens gentle
+  // sculpted slopes, so exaggerate the tilt toward or away from the sun and deepen the hollows.
+  let tilt = n.xz;
+  let sunPlanar = normalize(scene.sunDirection.xz);
+  albedo *= clamp(1.0 + dot(tilt, sunPlanar) * 0.9 - length(tilt) * 0.4, 0.5, 1.3);
+  albedo *= 1.0 + min(p.y, 0.0) * 0.7;
+
+  var surface = Surface(albedo, vec3f(0.035), 16.0, 1.0, vec3f(0.0));
   surface.occlusion = contactShade(p) * mix(1.0, 0.72, saturate(input.cavity * 2.0));
 
-  // Brush: warm ring for raise, cool for lower, coral cross-hair when aiming a destination.
+  // Brush: amber ring for elevate, blue for lower, coral when aiming a destination.
   let brush = scene.brush;
   if (brush.w != 0.0) {
     let width = max(footprint * 1.2, 0.012);
@@ -115,7 +118,7 @@ fn fs_main(input: TerrainVarying) -> @location(0) vec4f {
     }
     surface.emission += tint * (edge + inner) * 0.6;
     let inside = 1.0 - smoothstep(brush.z - footprint, brush.z + footprint, length(p.xz - brush.xy));
-    surface.albedo = mix(surface.albedo, surface.albedo * 1.12 + tint * 0.02, inside * 0.5);
+    surface.albedo = mix(surface.albedo, surface.albedo * 0.92 + tint * 0.03, inside * 0.5);
   }
 
   // Destination: a pulsing coral ring that settles, with a small cross at its centre.

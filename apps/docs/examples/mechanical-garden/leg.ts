@@ -1,52 +1,59 @@
-// One robot leg in body-local space (+X right, +Y up, +Z forward): an analytic coxa yaw about the
-// body's up axis, then femur + tibia as a two-bone math/ik fabrik3 chain hinged about the leg-plane
-// normal. The app clamps every target into the reachable band itself, because fabrik3's
-// isReachable only checks the outer radius, and it checks the knee side after each solve.
-// Segment frames are built from the hinge axis (X = hinge, Y = bone, Z = X × Y), so every child
-// joint is a pure rotation about its local X.
+// One robot-dog leg in body-local space (+X right, +Y up, +Z forward): an analytic hip abduction
+// roll φ about the body's forward axis, then femur + tibia as a two-bone math/ik fabrik3 chain
+// hinged about the rolled axis X' = (cos φ, sin φ, 0). The leg plane holds the body's forward axis
+// for every φ, so the knee always bends fore-aft and points backward, like the reference robot.
+// The app clamps every target into the reachable band itself, because fabrik3's isReachable only
+// checks the outer radius, and it checks the knee side after each solve. Segment frames are built
+// from the hinge axis (X = hinge, Y = bone, Z = X × Y), so every child joint is a pure rotation
+// about its local X.
 
 import { clamp, deltaAngle, mat3, quat, vec3, type Mat3, type Quat, type Vec3 } from "math";
 import { fabrik3 } from "math/ik";
 
-export const COXA = 0.15;
-export const FEMUR = 0.34;
-export const TIBIA = 0.44;
-/** Shortest and longest knee-to-foot distance the app asks for. */
-export const REACH_MARGIN = 0.05;
-export const REACH_MIN = Math.abs(FEMUR - TIBIA) + REACH_MARGIN;
-export const REACH_MAX = 0.96 * (FEMUR + TIBIA);
-/** How far the coxa may yaw away from its rest direction. */
-export const YAW_LIMIT = (58 * Math.PI) / 180;
+export const FEMUR = 0.3;
+export const TIBIA = 0.31;
+/** Lateral distance from the abduction pivot to the leg plane. */
+export const HIP_OFFSET = 0.075;
+/** Femur-to-foot distance at a knee interior angle (law of cosines). */
+export function reachAt(kneeAngle: number): number {
+  return Math.sqrt(FEMUR * FEMUR + TIBIA * TIBIA - 2 * FEMUR * TIBIA * Math.cos(kneeAngle));
+}
+/** The knee may fold to 35° and open to 160°: the reach band the app asks for. */
+export const REACH_MIN = reachAt((35 * Math.PI) / 180);
+export const REACH_MAX = reachAt((160 * Math.PI) / 180);
+/** How far the hip may roll the leg outward or inward. */
+export const ABD_LIMIT = 0.55;
+/** Femur pitch limits, measured about X' from the plane's down axis: backward (+) and forward. */
+export const FEMUR_BACK = (115 * Math.PI) / 180;
+export const FEMUR_FORWARD = (45 * Math.PI) / 180;
 /** fabrik3 stops at 0.01 by default; legs need it two orders of magnitude tighter. */
 export const SOLVE_THRESHOLD = 1e-4 * (FEMUR + TIBIA);
 
-const UP: Vec3 = [0, 1, 0];
-const DOWN: Vec3 = [0, -1, 0];
-const FEMUR_UP = (88 * Math.PI) / 180;
-const FEMUR_DOWN = (70 * Math.PI) / 180;
-/** Tibia limits around straight down: outward (anticlockwise) and inward (clockwise). */
-const TIBIA_OUT = (80 * Math.PI) / 180;
-const TIBIA_IN = (65 * Math.PI) / 180;
-/** Deterministic bent rest pose in leg-plane coordinates (s outward, y up) from the femur base. */
-const REST_KNEE_ANGLE = (52 * Math.PI) / 180;
-const REST_KNEE: readonly [number, number] = [FEMUR * Math.cos(REST_KNEE_ANGLE), FEMUR * Math.sin(REST_KNEE_ANGLE)];
+/** Tibia limits about the same axis and reference: forward (clockwise) and backward. */
+const TIBIA_FORWARD = (120 * Math.PI) / 180;
+const TIBIA_BACK = (50 * Math.PI) / 180;
+/** Deterministic bent rest pose in leg-plane coordinates (s forward, y along up'). */
+const REST_PITCH = (50 * Math.PI) / 180;
+const REST_KNEE: readonly [number, number] = [-FEMUR * Math.sin(REST_PITCH), -FEMUR * Math.cos(REST_PITCH)];
+const FORWARD: Vec3 = [0, 0, 1];
 
 export interface LegSpec {
-  /** Hip position in body space. */
+  /** Abduction pivot in body space. */
   readonly hip: Vec3;
-  /** Rest yaw of the coxa: the outward direction is (sin yaw, 0, cos yaw). */
-  readonly restYaw: number;
+  /** +1 for a right leg, −1 for a left leg: the leg plane sits at hip + side·HIP_OFFSET·X'. */
+  readonly side: 1 | -1;
 }
 
 export interface Leg {
   readonly spec: LegSpec;
   readonly chain: ReturnType<typeof fabrik3.createChain3>;
-  /** Current coxa yaw. */
-  yaw: number;
-  /** Outward horizontal direction, hinge axis = dir × up. */
-  readonly dir: Vec3;
+  /** Current abduction roll about body +Z. */
+  abduction: number;
+  /** Hinge axis X', the leg plane's up' and down axes. */
   readonly axis: Vec3;
-  /** Femur base (end of the coxa), knee and foot (effector), body space. */
+  readonly up: Vec3;
+  readonly down: Vec3;
+  /** Femur base (on the leg plane), knee and foot (effector), body space. */
   readonly femurBase: Vec3;
   readonly knee: Vec3;
   readonly foot: Vec3;
@@ -58,7 +65,7 @@ export interface Leg {
   rejected: number;
   /** Solves that came out on the wrong knee side and were re-laid from the rest pose. */
   relaid: number;
-  /** Knee and foot in leg-plane coordinates, used to warm-start the next solve. */
+  /** Knee and foot in leg-plane coordinates (s, y), used to warm-start the next solve. */
   readonly plane: [number, number, number, number];
 }
 
@@ -67,15 +74,16 @@ export function createLeg(spec: LegSpec): Leg {
   chain.solveDistanceThreshold = SOLVE_THRESHOLD;
   chain.minIterationChange = SOLVE_THRESHOLD * 1e-2;
   chain.maxIterations = 80;
-  // Laid along +Z with a bend; resetLeg() re-lays the real pose before any solve.
-  fabrik3.addBone(chain, [0, 0, 0], [0, FEMUR * 0.6, FEMUR * 0.8], fabrik3.createJoint3());
-  fabrik3.addBone(chain, [0, FEMUR * 0.6, FEMUR * 0.8], [0, FEMUR * 0.6 - TIBIA * 0.8, FEMUR * 0.8 + TIBIA * 0.6], fabrik3.createJoint3());
+  // Laid with a bend; resetLeg() re-lays the real pose before any solve.
+  fabrik3.addBone(chain, [0, 0, 0], [0, -FEMUR * 0.6, -FEMUR * 0.8], fabrik3.createJoint3());
+  fabrik3.addBone(chain, [0, -FEMUR * 0.6, -FEMUR * 0.8], [0, -FEMUR * 0.6 - TIBIA * 0.8, -FEMUR * 0.8 + TIBIA * 0.6], fabrik3.createJoint3());
   const leg: Leg = {
     spec,
     chain,
-    yaw: spec.restYaw,
-    dir: [0, 0, 1],
+    abduction: 0,
     axis: [1, 0, 0],
+    up: [0, 1, 0],
+    down: [0, -1, 0],
     femurBase: [0, 0, 0],
     knee: [0, 0, 0],
     foot: [0, 0, 0],
@@ -89,47 +97,90 @@ export function createLeg(spec: LegSpec): Leg {
   return leg;
 }
 
-/** The foot position of the rest pose in body space (where the gait plants it on flat ground). */
-export function restFoot(out: Vec3, spec: LegSpec, reach: number, drop: number): Vec3 {
-  out[0] = spec.hip[0] + Math.sin(spec.restYaw) * (COXA + reach);
-  out[1] = spec.hip[1] - drop;
-  out[2] = spec.hip[2] + Math.cos(spec.restYaw) * (COXA + reach);
-  return out;
+/**
+ * The abduction that puts a body-space point in the leg plane: φ = atan2(py, px) + acos(σd/r)
+ * with p measured from the hip, clamped to ±ABD_LIMIT. Inside the offset circle (r ≤ d) the plane
+ * is undefined and `fallback` is kept.
+ */
+export function abductionFor(spec: LegSpec, point: Vec3, fallback: number): number {
+  const px = point[0] - spec.hip[0];
+  const py = point[1] - spec.hip[1];
+  const r = Math.hypot(px, py);
+  if (!(r > HIP_OFFSET + 1e-6)) return fallback;
+  const wanted = Math.atan2(py, px) + Math.acos(clamp((spec.side * HIP_OFFSET) / r, -1, 1));
+  return clamp(deltaAngle(0, wanted), -ABD_LIMIT, ABD_LIMIT);
+}
+
+export interface LegAngles {
+  /** Abduction roll the point asks for, before the joint clamp. */
+  abduction: number;
+  /** Femur pitch about X' from down (backward positive) of the two-bone pose with the knee behind. */
+  pitch: number;
+  /** Femur-base-to-point distance in the leg plane. */
+  reach: number;
+}
+
+const angles: LegAngles = { abduction: 0, pitch: 0, reach: 0 };
+
+/**
+ * Joint angles a body-space point asks of a leg, by the same frame the solver uses (two-bone law
+ * of cosines for the pitch). Returns a shared object, overwritten by the next call.
+ */
+export function legAngles(spec: LegSpec, point: Vec3): LegAngles {
+  const px = point[0] - spec.hip[0];
+  const py = point[1] - spec.hip[1];
+  const r = Math.hypot(px, py);
+  const phi = r > HIP_OFFSET + 1e-6 ? deltaAngle(0, Math.atan2(py, px) + Math.acos(clamp((spec.side * HIP_OFFSET) / r, -1, 1))) : 0;
+  const clamped = clamp(phi, -ABD_LIMIT, ABD_LIMIT);
+  const c = Math.cos(clamped);
+  const sn = Math.sin(clamped);
+  // Plane coordinates from the femur base: s along +Z, y along up' = (−sin φ, cos φ, 0).
+  const bx = px - spec.side * HIP_OFFSET * c;
+  const by = py - spec.side * HIP_OFFSET * sn;
+  const s = point[2] - spec.hip[2];
+  const y = -sn * bx + c * by;
+  const reach = Math.hypot(s, y);
+  const d = clamp(reach, REACH_MIN, REACH_MAX);
+  const along = Math.acos(clamp((FEMUR * FEMUR + d * d - TIBIA * TIBIA) / (2 * FEMUR * d), -1, 1));
+  angles.abduction = phi;
+  angles.pitch = Math.atan2(-s, -y) + along;
+  angles.reach = reach;
+  return angles;
 }
 
 /** Back to the deterministic bent rest pose; forgets every previous solve. */
 export function resetLeg(leg: Leg): void {
-  leg.yaw = leg.spec.restYaw;
+  leg.abduction = 0;
   leg.plane[0] = REST_KNEE[0];
   leg.plane[1] = REST_KNEE[1];
-  leg.plane[2] = REST_KNEE[0] + TIBIA * 0.32;
-  leg.plane[3] = REST_KNEE[1] - TIBIA * 0.95;
+  leg.plane[2] = 0;
+  leg.plane[3] = -reachAt((82 * Math.PI) / 180);
   leg.error = 0;
   leg.rejected = 0;
   leg.relaid = 0;
   setFrame(leg);
   layFromPlane(leg);
-  fabrik3.getEffector(leg.foot, leg.chain);
-  vec3.copy(leg.knee, leg.chain.bones[0]!.end);
+  readChain(leg);
   vec3.copy(leg.goal, leg.foot);
 }
 
 function setFrame(leg: Leg): void {
-  const { dir, axis, femurBase, spec } = leg;
-  dir[0] = Math.sin(leg.yaw);
-  dir[1] = 0;
-  dir[2] = Math.cos(leg.yaw);
-  vec3.cross(axis, dir, UP);
-  femurBase[0] = spec.hip[0] + dir[0] * COXA;
-  femurBase[1] = spec.hip[1];
-  femurBase[2] = spec.hip[2] + dir[2] * COXA;
+  const { axis, up, down, femurBase, spec } = leg;
+  const c = Math.cos(leg.abduction);
+  const s = Math.sin(leg.abduction);
+  vec3.set(axis, c, s, 0);
+  vec3.set(up, -s, c, 0);
+  vec3.set(down, s, -c, 0);
+  femurBase[0] = spec.hip[0] + spec.side * HIP_OFFSET * c;
+  femurBase[1] = spec.hip[1] + spec.side * HIP_OFFSET * s;
+  femurBase[2] = spec.hip[2];
 }
 
-/** Plane coordinates (s along dir, y along up) from the femur base into body space. */
+/** Plane coordinates (s along +Z, y along up') from the femur base into body space. */
 function planePoint(out: Vec3, leg: Leg, s: number, y: number): Vec3 {
-  out[0] = leg.femurBase[0] + leg.dir[0] * s;
-  out[1] = leg.femurBase[1] + y;
-  out[2] = leg.femurBase[2] + leg.dir[2] * s;
+  out[0] = leg.femurBase[0] + leg.up[0] * y;
+  out[1] = leg.femurBase[1] + leg.up[1] * y;
+  out[2] = leg.femurBase[2] + s;
   return out;
 }
 
@@ -149,8 +200,9 @@ function layFromPlane(leg: Leg): void {
   const fl = vec3.length(laidFoot) || 1;
   vec3.scaleAndAdd(tibia.end, tibia.start, laidFoot, TIBIA / fl);
   fabrik3.setBaseLocation(leg.chain, leg.femurBase);
-  fabrik3.setBaseboneHingeConstraint(leg.chain, fabrik3.BaseboneConstraintType.GLOBAL_HINGE, leg.axis, FEMUR_DOWN, FEMUR_UP, leg.dir);
-  fabrik3.setHingeJoint(tibia.joint, fabrik3.JointType.GLOBAL_HINGE, leg.axis, TIBIA_IN, TIBIA_OUT, DOWN);
+  // Anticlockwise about X' turns the plane's down axis backward (−Z).
+  fabrik3.setBaseboneHingeConstraint(leg.chain, fabrik3.BaseboneConstraintType.GLOBAL_HINGE, leg.axis, FEMUR_FORWARD, FEMUR_BACK, leg.down);
+  fabrik3.setHingeJoint(tibia.joint, fabrik3.JointType.GLOBAL_HINGE, leg.axis, TIBIA_FORWARD, TIBIA_BACK, leg.down);
 }
 
 const reach: Vec3 = [0, 0, 0];
@@ -163,8 +215,9 @@ const tibiaDir: Vec3 = [0, 0, 0];
  * will be asked for (written to `out`), using the leg's current frame.
  */
 export function clampGoal(out: Vec3, leg: Leg, target: Vec3): Vec3 {
-  let s = (target[0] - leg.femurBase[0]) * leg.dir[0] + (target[2] - leg.femurBase[2]) * leg.dir[2];
-  let y = target[1] - leg.femurBase[1];
+  vec3.subtract(reach, target, leg.femurBase);
+  let s = vec3.dot(reach, FORWARD);
+  let y = vec3.dot(reach, leg.up);
   const d = Math.hypot(s, y);
   if (d < 1e-9) {
     s = 0;
@@ -179,7 +232,7 @@ export function clampGoal(out: Vec3, leg: Leg, target: Vec3): Vec3 {
   return planePoint(out, leg, s, y);
 }
 
-/** Which side of the femur→foot line the knee is on: negative = knee up (the only accepted pose). */
+/** Which side of the femur→foot line the knee is on: negative = knee behind (the only accepted pose). */
 export function kneeSide(leg: Leg): number {
   vec3.subtract(femurDir, leg.knee, leg.femurBase);
   vec3.subtract(tibiaDir, leg.foot, leg.knee);
@@ -187,8 +240,8 @@ export function kneeSide(leg: Leg): number {
   return vec3.dot(crossKnee, leg.axis);
 }
 
-// The last accepted pose, restored as a whole when a solve is rejected: yaw (and so the frame),
-// knee, foot, goal and the warm-start plane coordinates.
+// The last accepted pose, restored as a whole when a solve is rejected: abduction (and so the
+// frame), knee, foot, goal and the warm-start plane coordinates.
 const prevKnee: Vec3 = [0, 0, 0];
 const prevFoot: Vec3 = [0, 0, 0];
 const prevGoal: Vec3 = [0, 0, 0];
@@ -203,17 +256,12 @@ export function solveLeg(leg: Leg, target: Vec3): number {
     leg.rejected++;
     return Infinity;
   }
-  const prevYaw = leg.yaw;
+  const prevAbduction = leg.abduction;
   vec3.copy(prevKnee, leg.knee);
   vec3.copy(prevFoot, leg.foot);
   vec3.copy(prevGoal, leg.goal);
   for (let k = 0; k < 4; k++) prevPlane[k] = leg.plane[k]!;
-  const hx = target[0] - leg.spec.hip[0];
-  const hz = target[2] - leg.spec.hip[2];
-  if (hx * hx + hz * hz > 1e-8) {
-    const wanted = Math.atan2(hx, hz);
-    leg.yaw = leg.spec.restYaw + clamp(deltaAngle(leg.spec.restYaw, wanted), -YAW_LIMIT, YAW_LIMIT);
-  }
+  leg.abduction = abductionFor(leg.spec, target, leg.abduction);
   setFrame(leg);
   clampGoal(leg.goal, leg, target);
   layFromPlane(leg);
@@ -225,14 +273,14 @@ export function solveLeg(leg: Leg, target: Vec3): number {
     leg.plane[0] = REST_KNEE[0];
     leg.plane[1] = REST_KNEE[1];
     vec3.subtract(reach, leg.goal, leg.femurBase);
-    leg.plane[2] = reach[0] * leg.dir[0] + reach[2] * leg.dir[2];
-    leg.plane[3] = reach[1];
+    leg.plane[2] = vec3.dot(reach, FORWARD);
+    leg.plane[3] = vec3.dot(reach, leg.up);
     layFromPlane(leg);
     error = fabrik3.solve(leg.chain, leg.goal);
     readChain(leg);
   }
   if (!Number.isFinite(error) || !vec3.finite(leg.knee) || !vec3.finite(leg.foot) || kneeSide(leg) >= 0) {
-    leg.yaw = prevYaw;
+    leg.abduction = prevAbduction;
     setFrame(leg);
     vec3.copy(leg.knee, prevKnee);
     vec3.copy(leg.foot, prevFoot);
@@ -242,13 +290,13 @@ export function solveLeg(leg: Leg, target: Vec3): number {
     return Infinity;
   }
   leg.error = error;
-  // Remember the pose in plane coordinates so the next solve warm-starts after the coxa turns.
+  // Remember the pose in plane coordinates; forward stays in the plane for every abduction.
   vec3.subtract(reach, leg.knee, leg.femurBase);
-  leg.plane[0] = reach[0] * leg.dir[0] + reach[2] * leg.dir[2];
-  leg.plane[1] = reach[1];
+  leg.plane[0] = vec3.dot(reach, FORWARD);
+  leg.plane[1] = vec3.dot(reach, leg.up);
   vec3.subtract(reach, leg.foot, leg.femurBase);
-  leg.plane[2] = reach[0] * leg.dir[0] + reach[2] * leg.dir[2];
-  leg.plane[3] = reach[1];
+  leg.plane[2] = vec3.dot(reach, FORWARD);
+  leg.plane[3] = vec3.dot(reach, leg.up);
   return error;
 }
 
@@ -279,9 +327,11 @@ export function segmentRotation(out: Quat, axis: Vec3, from: Vec3, to: Vec3): Qu
   return quat.normalize(out, quat.fromMat3(out, frame3));
 }
 
-/** Body-space rotations of the coxa, femur and tibia segments. */
-export function legRotations(leg: Leg, coxa: Quat, femur: Quat, tibia: Quat): void {
-  segmentRotation(coxa, leg.axis, leg.spec.hip, leg.femurBase);
+const Z_AXIS: Vec3 = [0, 0, 1];
+
+/** Body-space rotations of the hip (abduction about +Z), femur and tibia segments. */
+export function legRotations(leg: Leg, hip: Quat, femur: Quat, tibia: Quat): void {
+  quat.setAxisAngle(hip, Z_AXIS, leg.abduction);
   segmentRotation(femur, leg.axis, leg.femurBase, leg.knee);
   segmentRotation(tibia, leg.axis, leg.knee, leg.foot);
 }

@@ -1,9 +1,9 @@
-// GPU side of the garden, shared by the live renderer and the thumbnail. DOM-free.
+// GPU side of the training ground, shared by the live renderer and the thumbnail. DOM-free.
 //
 // Per frame: the rig poses the robots (only when the simulation stepped), publishes their worlds
 // into the part collections, each bridge's publish() uploads changed rows and returns its count,
 // and the sun shadow and colour passes draw with that same count. Terrain uploads only the vertex
-// rows a sculpt touched; scenery republishes only when its worlds changed.
+// rows a sculpt touched.
 
 import { vec3, type Quat, type Vec3 } from "math";
 import { draw, effect, geometry, sampler, target, uniforms, type Draw, type Frame, type FramePass, type Geometry, type Gpu, type Target } from "vgpu";
@@ -16,7 +16,6 @@ import {
   rigPose,
   viewMatrices,
   type CameraMatrices,
-  type InstanceId,
   type Lens,
   type OrbitRig,
   type Pose,
@@ -28,37 +27,31 @@ import { MAX_ROBOTS, type Colony } from "./colony";
 import debugShader from "./debug.wgsl";
 import floorShader from "./floor.wgsl";
 import { LEG_COUNT } from "./robot";
-import { buildPartMeshes, buildSceneryMeshes, MESH_VERTEX_FLOATS, type MeshData } from "./meshes";
+import { buildPartMeshes, buildPlinthMesh, MESH_VERTEX_FLOATS, type MeshData } from "./meshes";
 import partsShader from "./parts.wgsl";
 import presentShader from "./present.wgsl";
 import { createRig, PART_ATTRIBUTES, PART_MESHES, poseRig, publishRig, ROWS_PER_ROBOT, type PartCollection, type PartMesh, type Rig } from "./rig";
-import type { Item, Scenery } from "./scenery";
-import { MOSS_COUNT, REED_COUNT, STONE_COUNT } from "./scenery";
 import shadowShader from "./shadow.wgsl";
 import { uploadTerrain, VERTEX_BYTES, type Terrain } from "./terrain";
 import terrainShader from "./terrain.wgsl";
 
 export const LENS: Lens = { fov: 35, near: 0.05, far: 100 };
 export const SHADOW_SIZE = 2048;
-/** Display-encoded clear colour; matches backgroundColor() in common.wgsl at the horizon. */
-export const CLEAR_COLOR = [0.055, 0.058, 0.066] as const;
+/** Display-encoded clear colour (the neutral gray backdrop); matches backgroundColor(0) in common.wgsl. */
+export const CLEAR_COLOR = [0.5, 0.505, 0.51] as const;
 const SUN_DIRECTION = normalize([-0.45, 0.8, 0.35]);
 const SUN_DISTANCE = 30;
 const SUN_HALF_EXTENT = 11.5;
-/** Debug segments per robot: three bones, a target, a foot and a landing mark per leg, and a heading. */
+/** Debug segments per robot: hip offset, femur, tibia, a target, a foot and a landing mark per leg, and a heading. */
 const SEGMENTS_PER_ROBOT = LEG_COUNT * 6 + 1;
 const SEGMENT_FLOATS = 10;
-const BODY_CONTACT_RADIUS = 0.34;
+const BODY_CONTACT_RADIUS = 0.3;
 
-const SCENERY_MESHES = ["stone", "moss", "reed"] as const;
-type SceneryMesh = (typeof SCENERY_MESHES)[number];
-const SCENERY_CAPACITY: Record<SceneryMesh, number> = { stone: STONE_COUNT, moss: MOSS_COUNT, reed: REED_COUNT };
-
-/** Brush ring: x, z, radius, mode (0 hidden, 1 raise, -1 lower, 2 destination aim). */
+/** Brush ring: x, z, radius, mode (0 hidden, 1 elevate, -1 lower, 2 destination aim). */
 export type BrushOverlay = [number, number, number, number];
 
 export interface RenderState {
-  /** Seconds of wall time (drives reed sway and the destination pulse; frozen under reduced motion is fine). */
+  /** Seconds of wall time (drives the destination pulse; frozen under reduced motion is fine). */
   readonly time: number;
   readonly brush: BrushOverlay;
   readonly debug: boolean;
@@ -71,7 +64,7 @@ export interface GardenCamera {
 }
 
 export interface UploadCounters {
-  /** Instances drawn in the last colour pass (robot parts, scenery and the plinth). */
+  /** Instances drawn in the last colour pass (robot parts and the plinth). */
   instances: number;
   /** Running totals since creation: terrain vertex bytes written, and robot part rows re-posed and published. */
   terrainBytes: number;
@@ -94,21 +87,14 @@ export interface GardenPipeline {
 export function createPipeline(gpu: Gpu, colony: Colony, size: readonly [number, number]): GardenPipeline {
   const rig = createRig(MAX_ROBOTS);
   const partMeshes = buildPartMeshes();
-  const sceneryMeshes = buildSceneryMeshes();
 
   const partBridges = Object.fromEntries(
     PART_MESHES.map((mesh) => [mesh, instanceGeometry(gpu, rig.collections[mesh], { mesh: meshGeometry(gpu, partMeshes[mesh]) })]),
   ) as Record<PartMesh, InstanceGeometry>;
-  const scenery = Object.fromEntries(
-    SCENERY_MESHES.map((mesh) => {
-      const collection: PartCollection = instances({ capacity: SCENERY_CAPACITY[mesh], attributes: PART_ATTRIBUTES });
-      return [mesh, { collection, ids: [] as InstanceId[], bridge: instanceGeometry(gpu, collection, { mesh: meshGeometry(gpu, sceneryMeshes[mesh]) }) }];
-    }),
-  ) as Record<SceneryMesh, { collection: PartCollection; ids: InstanceId[]; bridge: InstanceGeometry }>;
   // The plinth is one static instance at the origin.
   const plinthCollection: PartCollection = instances({ capacity: 1, attributes: PART_ATTRIBUTES });
   plinthCollection.add();
-  const plinthBridge = instanceGeometry(gpu, plinthCollection, { mesh: meshGeometry(gpu, sceneryMeshes.plinth) });
+  const plinthBridge = instanceGeometry(gpu, plinthCollection, { mesh: meshGeometry(gpu, buildPlinthMesh()) });
 
   const terrain = colony.terrain;
   const terrainGeometry = geometry(gpu, {
@@ -189,29 +175,23 @@ export function createPipeline(gpu: Gpu, colony: Colony, size: readonly [number,
   const linearSampler = sampler(gpu, { minFilter: "linear", magFilter: "linear" });
   const lit = { camera: cameraUniforms, scene: sceneUniforms, shadowMap: shadowTarget, shadowSampler };
 
-  const shadowDraw = (geometryToDraw: Geometry, label: string, cull: "back" | "none" = "back") =>
+  const shadowDraw = (geometryToDraw: Geometry, label: string) =>
     draw(gpu, {
       shader: shadowShader,
       geometry: geometryToDraw,
       targets: [shadowTarget],
       writeMask: [],
       depth: { bias: 2, biasSlopeScale: 2.5 },
-      cull,
+      cull: "back",
       set: { scene: sceneUniforms },
       label: `garden.shadow.${label}`,
     });
-  const colorDraw = (geometryToDraw: Geometry, label: string, cull: "back" | "none" = "back") =>
-    draw(gpu, { shader: partsShader, geometry: geometryToDraw, targets: [sceneTarget], cull, set: lit, label: `garden.${label}` });
+  const colorDraw = (geometryToDraw: Geometry, label: string) =>
+    draw(gpu, { shader: partsShader, geometry: geometryToDraw, targets: [sceneTarget], cull: "back", set: lit, label: `garden.${label}` });
 
   // Instanced passes in drawing order: [bridge, shadow draw, colour draw].
   const instanced: [InstanceGeometry, Draw, Draw][] = [
     ...PART_MESHES.map((mesh): [InstanceGeometry, Draw, Draw] => [partBridges[mesh], shadowDraw(partBridges[mesh].geometry, mesh), colorDraw(partBridges[mesh].geometry, mesh)]),
-    ...SCENERY_MESHES.map((mesh): [InstanceGeometry, Draw, Draw] => {
-      // Reed blades are two-sided.
-      const cull = mesh === "reed" ? "none" : "back";
-      const { bridge } = scenery[mesh];
-      return [bridge, shadowDraw(bridge.geometry, mesh, cull), colorDraw(bridge.geometry, mesh, cull)];
-    }),
     [plinthBridge, shadowDraw(plinthBridge.geometry, "plinth"), colorDraw(plinthBridge.geometry, "plinth")],
   ];
   const terrainShadow = draw(gpu, {
@@ -252,8 +232,6 @@ export function createPipeline(gpu: Gpu, colony: Colony, size: readonly [number,
   let posedSeed = Number.NaN;
   const uploaded = { generation: terrain.generation };
   const counters: UploadCounters = { instances: 0, terrainBytes: 0, rigRows: 0 };
-  let publishedScenery: Scenery | null = null;
-  let publishedSceneryRevision = -1;
   let destinationRevision = -1;
   let destinationSince = 0;
 
@@ -269,16 +247,6 @@ export function createPipeline(gpu: Gpu, colony: Colony, size: readonly [number,
 
   function syncTerrain(): void {
     counters.terrainBytes += uploadTerrain(terrain, terrainGeometry, uploaded);
-  }
-
-  function syncScenery(): void {
-    const current = colony.scenery;
-    if (current === publishedScenery && current.revision === publishedSceneryRevision) return;
-    publishedScenery = current;
-    publishedSceneryRevision = current.revision;
-    publishItems(scenery.stone, current.stones, current.stoneWorlds);
-    publishItems(scenery.moss, current.moss, current.mossWorlds);
-    publishItems(scenery.reed, current.reeds, current.reedWorlds);
   }
 
   function syncContacts(): number {
@@ -324,7 +292,6 @@ export function createPipeline(gpu: Gpu, colony: Colony, size: readonly [number,
     render(currentFrame, output, state) {
       syncRobots();
       syncTerrain();
-      syncScenery();
       const counts = instanced.map(([bridge]) => bridge.publish());
       counters.instances = counts.reduce((sum, count) => sum + count, 0);
       const destination = colony.destination;
@@ -373,23 +340,9 @@ function meshGeometry(gpu: Gpu, mesh: MeshData): Geometry {
   });
 }
 
-const itemStyle: [number, number, number, number] = [0, 1, 0, 0];
-
-/** Match a scenery collection to `items` (tail add/remove) and copy their worlds. */
-function publishItems(target: { collection: PartCollection; ids: InstanceId[] }, items: readonly Item[], worlds: Float32Array): void {
-  const { collection, ids } = target;
-  while (ids.length > items.length) collection.remove(ids.pop()!);
-  while (ids.length < items.length) ids.push(collection.add());
-  items.forEach((item, index) => {
-    itemStyle[2] = item.variant;
-    collection.set(ids[index]!, { style: itemStyle });
-  });
-  if (ids.length > 0) collection.setWorlds(ids, worlds, 0);
-}
-
 // Debug colours (display sRGB) and widths in CSS px.
 const DEBUG = {
-  coxa: [0.95, 0.95, 0.95, 4.5],
+  hip: [0.95, 0.95, 0.95, 4.5],
   femur: [1, 0.85, 0.15, 5],
   tibia: [0.2, 0.85, 1, 4.5],
   target: [1, 0.25, 0.85, 7],
@@ -432,7 +385,7 @@ export function writeSegments(out: Float32Array, colony: Colony): number {
       const foot = robot.feet[leg]!;
       bodyPoint(worldA, robot.position, robot.rotation, l.spec.hip);
       bodyPoint(worldB, robot.position, robot.rotation, l.femurBase);
-      push(worldA, worldB, DEBUG.coxa);
+      push(worldA, worldB, DEBUG.hip);
       bodyPoint(worldA, robot.position, robot.rotation, l.knee);
       push(worldB, worldA, DEBUG.femur);
       bodyPoint(worldB, robot.position, robot.rotation, l.foot);
@@ -442,9 +395,9 @@ export function writeSegments(out: Float32Array, colony: Colony): number {
       push(foot.position, foot.position, foot.planted ? DEBUG.planted : DEBUG.lifted);
       push(foot.landing, foot.landing, foot.planted ? DEBUG.planted : DEBUG.landing);
     }
-    vec3.set(scratch, 0, 0.16, 0.45);
+    vec3.set(scratch, 0, 0.14, 0.62);
     bodyPoint(worldA, robot.position, robot.rotation, scratch);
-    vec3.set(scratch, 0, 0.16, 0.12);
+    vec3.set(scratch, 0, 0.14, 0.3);
     bodyPoint(worldB, robot.position, robot.rotation, scratch);
     push(worldB, worldA, DEBUG.heading);
   }

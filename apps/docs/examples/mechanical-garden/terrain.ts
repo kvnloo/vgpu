@@ -1,4 +1,4 @@
-// The sculptable ceramic tile. One CPU height grid is the only source of truth: its samples are the
+// The sculptable training-ground tile. One CPU height grid is the only source of truth: its samples are the
 // mesh vertices, the index buffer splits every cell along the same diagonal the query uses, and the
 // shader only reads the uploaded heights. Edits are bounded (rate, range and neighbour slope), so
 // planted feet can follow them without leaving the leg's reach band.
@@ -78,11 +78,12 @@ export function generate(terrain: Terrain, seed: number): void {
     for (let i = 0; i < GRID; i++) {
       const x = gridX(i);
       const z = gridX(j);
-      const n = fbm((f) => simplex2d.sample(noise, (x + ox) * 0.24 * f, (z + oz) * 0.24 * f), 4, 2.03, 0.48);
-      // A broad dune to the north-east, a shallow pan to the south-west, noise on top.
-      const dune = 0.28 * Math.exp(-((x - 1.7) ** 2 + (z + 1.4) ** 2) / 3.2);
-      const pan = -0.16 * Math.exp(-((x + 1.6) ** 2 + (z - 1.5) ** 2) / 2.4);
-      heights[j * GRID + i] = rimMask(i, j) * (0.22 * n + dune + pan);
+      const n = fbm((f) => simplex2d.sample(noise, (x + ox) * 0.2 * f, (z + oz) * 0.2 * f), 3, 2.03, 0.45);
+      // A graded training ground: a low berm to the north-east, a shallow dip to the south-west and
+      // a faint unevenness, so the default walk already shows the body pitching over relief.
+      const berm = 0.2 * Math.exp(-((x - 1.7) ** 2 + (z + 1.4) ** 2) / 3.2);
+      const dip = -0.12 * Math.exp(-((x + 1.6) ** 2 + (z - 1.5) ** 2) / 2.4);
+      heights[j * GRID + i] = rimMask(i, j) * (0.08 * n + berm + dip);
     }
   }
   relaxAll(heights);

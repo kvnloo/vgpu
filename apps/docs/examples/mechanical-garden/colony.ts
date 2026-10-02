@@ -1,12 +1,11 @@
-// The colony: terrain, scenery and a fixed pool of robots advanced on a fixed timestep. Steering
-// (wander, a shared destination, separation, stones, tile edges) lives here; locomotion lives in
-// robot.ts. Nothing here touches the DOM or the GPU.
+// The colony: the training-ground terrain and a fixed pool of robot dogs advanced on a fixed
+// timestep. Steering (wander, a shared destination, separation, tile edges) lives here; locomotion
+// lives in robot.ts. Nothing here touches the DOM or the GPU.
 
 import { clamp } from "math";
 import { mulberry32, type Mulberry32 } from "math/random";
 
-import { BODY_RADIUS, createRobot, placeRobot, stepRobot, type Robot } from "./robot";
-import { avoidStones, createScenery, reseat, type Scenery } from "./scenery";
+import { createRobot, placeRobot, stepRobot, type Robot } from "./robot";
 import { BRUSH_RADIUS, BRUSH_STRENGTH, clampToTile, createTerrain, generate, HALF, sculpt, type Terrain } from "./terrain";
 
 export const MAX_ROBOTS = 48;
@@ -38,7 +37,7 @@ export const PRESETS: Readonly<Record<PresetName, { readonly count: number }>> =
 export const DEFAULT_PRESET: PresetName = "colony";
 export const DEFAULT_SEED = 7;
 
-export type BrushMode = "raise" | "lower";
+export type BrushMode = "elevate" | "lower";
 
 export interface BrushInput {
   /** Sculpt while true (pointer held, or a keyboard/GUI hold). */
@@ -62,7 +61,6 @@ export interface Destination {
 export interface Colony {
   seed: number;
   readonly terrain: Terrain;
-  scenery: Scenery;
   /** Stable robot objects; robots [0, count) are active. */
   readonly robots: readonly Robot[];
   count: number;
@@ -106,7 +104,6 @@ export function createColony(options: ColonyOptions = {}): Colony {
   const colony: Colony = {
     seed,
     terrain,
-    scenery: createScenery(seed, terrain),
     robots: Array.from({ length: MAX_ROBOTS }, (_, index) => createRobot(index)),
     count: 0,
     paused: false,
@@ -116,7 +113,7 @@ export function createColony(options: ColonyOptions = {}): Colony {
     accumulator: 0,
     dropped: 0,
     destination: { active: false, x: 0, z: 0, revision: 0 },
-    brush: { active: false, mode: "raise", x: 0, z: 0, radius: 0.9, strength: 0.35 },
+    brush: { active: false, mode: "elevate", x: 0, z: 0, radius: 0.9, strength: 0.35 },
     randoms: Array.from({ length: MAX_ROBOTS }, () => mulberry32.create(0)),
     idle: new Float32Array(MAX_ROBOTS),
     slots: new Float32Array(MAX_ROBOTS * 2),
@@ -134,11 +131,10 @@ function robotSeed(seed: number, index: number): number {
   return (Math.imul(seed + 1, 0x9e3779b1) ^ Math.imul(index + 1, 0x85ebca77)) >>> 0;
 }
 
-/** Regenerate terrain, scenery and robots for a seed; the same seed always gives the same colony. */
+/** Regenerate terrain and robots for a seed; the same seed always gives the same colony. */
 export function reset(colony: Colony, seed: number, count = colony.count): void {
   colony.seed = seed;
   generate(colony.terrain, seed);
-  colony.scenery = createScenery(seed, colony.terrain);
   colony.time = 0;
   colony.steps = 0;
   colony.accumulator = 0;
@@ -157,7 +153,7 @@ const spot: [number, number] = [0, 0];
 
 /**
  * A spawn point for robot `index`: the first sunflower slot around the centre (starting at its own)
- * that is clear of stones and robots, else the roomiest one tried.
+ * that is clear of other robots, else the roomiest one tried.
  */
 function spawn(colony: Colony, index: number): void {
   let best = -1;
@@ -167,9 +163,8 @@ function spawn(colony: Colony, index: number): void {
     const k = (index + attempt * 7) % 64;
     const radius = 0.8 * Math.sqrt(k + 0.3);
     const angle = k * GOLDEN_ANGLE + colony.seed * 0.61;
-    avoidStones(spot, colony.scenery, Math.cos(angle) * radius, Math.sin(angle) * radius, BODY_RADIUS + 0.1, 1);
-    // The tile clamp can push a point near the rim back onto a stone; skip those slots.
-    if (onStone(colony, spot[0], spot[1])) continue;
+    spot[0] = clampToTile(Math.cos(angle) * radius, 1);
+    spot[1] = clampToTile(Math.sin(angle) * radius, 1);
     let room = Infinity;
     for (let other = 0; other < colony.count; other++) {
       const robot = colony.robots[other]!;
@@ -196,9 +191,9 @@ export function setCount(colony: Colony, count: number): void {
     spawn(colony, index);
     placeRobot(robot, colony.terrain, spot[0], spot[1], mulberry32.sample(random) * Math.PI * 2);
     colony.count = index + 1;
-    robot.palette = (index + colony.seed) % 3;
+    // Every third dog carries the sensor payload (lidar mast and payload box).
+    robot.palette = index % 3 === 1 ? 1 : 0;
     robot.phase = mulberry32.sample(random);
-    robot.blink = 1 + mulberry32.sample(random) * 4;
     colony.idle[index] = 0.5 + mulberry32.sample(random) * 2;
   }
   for (let index = next; index < colony.count; index++) colony.robots[index]!.active = false;
@@ -269,8 +264,6 @@ export function step(colony: Colony): void {
       pushX: colony.push[index * 2]!,
       pushZ: colony.push[index * 2 + 1]!,
     });
-    robot.blink -= FIXED_DT;
-    if (robot.blink < -0.14) robot.blink = 2 + mulberry32.sample(colony.randoms[index]!) * 4;
   }
   colony.time += FIXED_DT;
   colony.steps++;
@@ -283,10 +276,7 @@ function applyBrush(colony: Colony): void {
   const strength = clamp(brush.strength, BRUSH_STRENGTH.min, BRUSH_STRENGTH.max);
   const x = clampToTile(brush.x);
   const z = clampToTile(brush.z);
-  if (!sculpt(terrain, { x, z, radius, rate: brush.mode === "lower" ? -strength : strength }, FIXED_DT)) return;
-  // Neighbour-clamped edits can spread a few cells past the radius.
-  const reach = radius + 0.4;
-  reseat(colony.scenery, terrain, x - reach, z - reach, x + reach, z + reach);
+  sculpt(terrain, { x, z, radius, rate: brush.mode === "lower" ? -strength : strength }, FIXED_DT);
 }
 
 const steering: [number, number] = [0, 0];
@@ -331,15 +321,10 @@ const SLOT_RANKS = 720;
 /** Slots stay this far inside the rim, clear of the steering's edge push (HALF − 1). */
 const SLOT_MARGIN = 1;
 
-function onStone(colony: Colony, x: number, z: number): boolean {
-  return colony.scenery.stones.some((stone) => Math.hypot(stone.x - x, stone.z - z) < stone.radius + BODY_RADIUS + 0.05);
-}
-
 /**
  * Lay out one slot per robot around the destination and hand them out. Sunflower points
- * 0.95·√(rank + 0.8) from the destination are pushed off stones and onto the tile; a point that
- * lands on a stone or within SLOT_GAP of an earlier slot (the rim and stones fold outer ranks onto
- * each other) is skipped, so the crowd fans out along the rim instead of stacking there. If the
+ * 0.95·√(rank + 0.8) from the destination are clamped onto the tile; a point within SLOT_GAP of an
+ * earlier slot (the rim folds outer ranks onto each other) is skipped, so the crowd fans out along the rim instead of stacking there. If the
  * tile cannot fit them all at SLOT_GAP, the gap shrinks until it can. Slots go innermost first to
  * the nearest robot still without one: stable for the whole walk, and short paths that rarely cross.
  */
@@ -352,9 +337,8 @@ function layoutSlots(colony: Colony): void {
     for (let rank = 0; rank < SLOT_RANKS && filled < count; rank++) {
       const radius = rank === 0 ? 0 : 0.95 * Math.sqrt(rank + 0.8);
       const angle = rank * GOLDEN_ANGLE;
-      avoidStones(spot, colony.scenery, destination.x + Math.cos(angle) * radius, destination.z + Math.sin(angle) * radius, BODY_RADIUS + 0.1, SLOT_MARGIN);
-      // Below a robot's own size a crowd cannot fit anyway; then any free point will do.
-      if (gap > BODY_RADIUS && onStone(colony, spot[0], spot[1])) continue;
+      spot[0] = clampToTile(destination.x + Math.cos(angle) * radius, SLOT_MARGIN);
+      spot[1] = clampToTile(destination.z + Math.sin(angle) * radius, SLOT_MARGIN);
       let clear = true;
       for (let other = 0; other < filled && clear; other++) clear = Math.hypot(slots[other * 2]! - spot[0], slots[other * 2 + 1]! - spot[1]) >= gap;
       if (!clear) continue;
@@ -408,7 +392,8 @@ function pickWander(colony: Colony, index: number): void {
     const distance = 1.2 + mulberry32.sample(random) * 2.2;
     const x = robot.position[0] * 0.7 + Math.cos(angle) * distance;
     const z = robot.position[2] * 0.7 + Math.sin(angle) * distance;
-    avoidStones(goal, colony.scenery, x, z, BODY_RADIUS + 0.15, 1.1);
+    goal[0] = clampToTile(x, 1.1);
+    goal[1] = clampToTile(z, 1.1);
     const room = roomAt(colony, index, goal[0], goal[1]);
     if (room > best) {
       best = room;
@@ -556,27 +541,6 @@ function steer(colony: Colony, index: number): void {
       const push = ((SPACING - distance) / SPACING) * 1.6 * yieldFactor;
       sx += (dx / distance) * push;
       sz += (dz / distance) * push;
-    }
-    // Stones push outward and, while the goal lies beyond them, also sideways (toward the side the
-    // goal is on), so a robot slides around a stone instead of resting where pull and push cancel.
-    const goalX = toGoal > 1e-6 ? (robot.goal[0] - x) / toGoal : 0;
-    const goalZ = toGoal > 1e-6 ? (robot.goal[1] - z) / toGoal : 0;
-    for (const stone of colony.scenery.stones) {
-      const dx = x - stone.x;
-      const dz = z - stone.z;
-      const distance = Math.hypot(dx, dz);
-      const limit = stone.radius + BODY_RADIUS + 0.35;
-      if (distance >= limit || distance < 1e-6) continue;
-      const nx = dx / distance;
-      const nz = dz / distance;
-      const push = ((limit - distance) / limit) * 2;
-      sx += nx * push;
-      sz += nz * push;
-      const facing = -(nx * goalX + nz * goalZ);
-      if (facing <= 0) continue;
-      const side = nx * goalZ - nz * goalX >= 0 ? 1 : -1;
-      sx += -nz * side * push * facing;
-      sz += nx * side * push * facing;
     }
     const edge = HALF - 1;
     if (Math.abs(x) > edge) sx -= Math.sign(x) * (Math.abs(x) - edge) * 2;

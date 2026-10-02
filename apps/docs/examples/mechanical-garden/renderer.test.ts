@@ -21,6 +21,8 @@ const guiHarness = vi.hoisted(() => {
     onFinishChange(change: (value: unknown) => unknown): Control;
     decimals(): Control;
     disable(): Control;
+    enabled: boolean;
+    enable(enabled?: boolean): Control;
     updateDisplay(): Control;
   }
   class FakeGui {
@@ -68,6 +70,11 @@ const guiHarness = vi.hoisted(() => {
         },
         decimals: () => control,
         disable: () => control,
+        enabled: true,
+        enable(enabled = true) {
+          control.enabled = enabled;
+          return control;
+        },
         updateDisplay: () => control,
       };
       this.controls.push(control);
@@ -95,7 +102,39 @@ const guiHarness = vi.hoisted(() => {
   return { FakeGui, instances };
 });
 
+const toolbarHarness = vi.hoisted(() => {
+  const instances: {
+    options: import("./toolbar").ToolbarOptions;
+    element: object;
+    adjusting: boolean;
+    setTool: ReturnType<typeof vi.fn>;
+    setDestination: ReturnType<typeof vi.fn>;
+    setPaused: ReturnType<typeof vi.fn>;
+    layout: ReturnType<typeof vi.fn>;
+    dispose: ReturnType<typeof vi.fn>;
+  }[] = [];
+  const createToolbar = (_container: unknown, options: import("./toolbar").ToolbarOptions) => {
+    const toolbar = {
+      options,
+      element: {},
+      adjusting: false,
+      setTool: vi.fn(),
+      setDestination: vi.fn(),
+      setPaused: vi.fn(),
+      layout: vi.fn(),
+      dispose: vi.fn(),
+    };
+    instances.push(toolbar);
+    return toolbar;
+  };
+  return { instances, createToolbar };
+});
+
 vi.mock("lil-gui", () => ({ default: guiHarness.FakeGui }));
+vi.mock("./toolbar", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./toolbar")>()),
+  createToolbar: toolbarHarness.createToolbar,
+}));
 vi.mock("vgpu", () => ({
   init: mocks.init,
   surface: (gpu: any, ...args: unknown[]) => gpu.fns.surface(...args),
@@ -122,7 +161,7 @@ vi.mock("./colony", async (importOriginal) => {
 
 import { FIXED_DT } from "./colony";
 import { renderThumbnail, THUMB_STEPS } from "./render-thumbnail";
-import { createRenderer, PULSE_STEPS, REDUCED_PACE } from "./renderer";
+import { createRenderer, REDUCED_PACE } from "./renderer";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -164,7 +203,8 @@ function listenerTarget(extra: Record<string, unknown> = {}) {
 
 function setup(options: { reducedMotion?: boolean; width?: number; height?: number } = {}) {
   const motion = listenerTarget({ matches: options.reducedMotion ?? false });
-  vi.stubGlobal("window", { matchMedia: vi.fn(() => motion) });
+  const window = listenerTarget({ matchMedia: vi.fn(() => motion) });
+  vi.stubGlobal("window", window);
   vi.stubGlobal("document", { activeElement: null });
 
   const container = listenerTarget({ clientWidth: options.width ?? 1280, clientHeight: options.height ?? 720 });
@@ -210,6 +250,7 @@ function setup(options: { reducedMotion?: boolean; width?: number; height?: numb
   mocks.init.mockResolvedValueOnce(gpu);
   return {
     motion,
+    window,
     container,
     canvas,
     output,
@@ -218,6 +259,7 @@ function setup(options: { reducedMotion?: boolean; width?: number; height?: numb
     pipeline,
     gpu,
     gui: () => guiHarness.instances[0]!,
+    toolbar: () => toolbarHarness.instances.at(-1)!,
     colony: () => mocks.colonies.at(-1) as Colony,
     runFrame: () => liveFrame?.({}),
     lastBrush: () => pipeline.render.mock.calls.at(-1)?.[2].brush as number[],
@@ -232,6 +274,7 @@ afterEach(() => {
   mocks.colonies.length = 0;
   mocks.manualSteps.length = 0;
   guiHarness.instances.length = 0;
+  toolbarHarness.instances.length = 0;
 });
 
 test("initializes, steps the colony on the fixed clock and renders every frame", async () => {
@@ -242,12 +285,24 @@ test("initializes, steps the colony on the fixed clock and renders every frame",
   expect(env.gpu.fns.surface).toHaveBeenCalledWith(env.canvas, { dpr: [1, 2] });
   expect(env.pipeline.resize).toHaveBeenCalledOnce();
   const gui = env.gui();
-  expect(gui.options).toMatchObject({ container: env.container, title: "Mechanical Garden" });
+  expect(gui.options).toMatchObject({ container: env.container, title: "Settings" });
   expect(gui.domElement.style.position).toBe("absolute");
-  expect(gui.folders.map((folder) => folder._title)).toEqual(["Scene", "Sculpt", "Camera", "Debug", "Stats"]);
+  // lil-gui keeps advanced settings only: no tool selector and no one-shot sculpt actions.
+  expect(gui.folders.map((folder) => folder._title)).toEqual(["Scene", "Camera", "Debug", "Stats"]);
   expect(gui.control("planted IK residual")).toBeDefined();
-  expect(env.canvas.count()).toBe(12);
+  expect(gui.controls.some((control) => control.property === "tool" || /raise|lower|elevate/.test(control.label ?? ""))).toBe(false);
+  expect(env.toolbar().options).toMatchObject({ tool: "orbit", touch: false });
+  // The tools precede the Settings panel in the container, so they come first in tab order.
+  expect(env.toolbar().options.before).toBe(gui.domElement);
+  expect(env.toolbar().layout).toHaveBeenCalledWith(1280);
+  // Docked at the bottom, Settings stops 8 px above the bar (8 px margins top and bottom).
+  env.toolbar().options.onDock!(120);
+  expect(gui.domElement.style.maxHeight).toBe("calc(100% - 144px)");
+  env.toolbar().options.onDock!(null);
+  expect(gui.domElement.style.maxHeight).toBe("calc(100% - 16px)");
+  expect(env.canvas.count()).toBe(13);
   expect(env.container.count()).toBe(2);
+  expect(env.window.count()).toBe(1);
   expect(env.motion.count()).toBe(1);
 
   for (let index = 0; index < 3; index++) env.runFrame();
@@ -289,7 +344,9 @@ test("dispose is idempotent and releases listeners, the GUI, the loop and the GP
   expect(env.unsubscribeResize).toHaveBeenCalledOnce();
   expect(env.canvas.count()).toBe(0);
   expect(env.container.count()).toBe(0);
+  expect(env.window.count()).toBe(0);
   expect(env.motion.count()).toBe(0);
+  expect(env.toolbar().dispose).toHaveBeenCalledOnce();
   expect(env.gui().destroy).toHaveBeenCalledOnce();
   expect(env.gpu.dispose).toHaveBeenCalledOnce();
 });
@@ -339,79 +396,164 @@ test("a throwing frame disposes once and rethrows", async () => {
   expect(env.pipeline.render).toHaveBeenCalledOnce();
 });
 
-test("a GUI sculpt pulse fired while paused ends after PULSE_STEPS manual steps", async () => {
+/** Records the smoothed camera handed to the pipeline each frame. */
+function cameraLog(env: ReturnType<typeof setup>) {
+  const poses: number[][] = [];
+  env.pipeline.updateCamera.mockImplementation((rig: { target: number[]; pan: number[]; yaw: number; pitch: number; distance: number }) => {
+    poses.push([...rig.target, ...rig.pan, rig.yaw, rig.pitch, rig.distance]);
+  });
+  return poses;
+}
+
+test("an edit tool holds the camera still and suspends follow and idle orbit until Orbit returns", async () => {
   const env = setup();
   const renderer = createRenderer({ canvas: env.canvas as unknown as HTMLCanvasElement });
   await renderer.ready;
   const gui = env.gui();
-  const colony = env.colony();
+  const toolbar = env.toolbar();
+  const poses = cameraLog(env);
+  gui.set("follow robot 1", true);
+  for (let index = 0; index < 4; index++) env.runFrame();
+  // Orbit: idle orbit turns the camera and follow pulls it toward robot 1.
+  expect(poses[3]![6]).toBeGreaterThan(poses[0]![6]!);
 
-  gui.set("paused", true);
-  gui.press("raise at cursor");
-  // Paused frames sculpt nothing and do not use up the pulse.
-  for (let index = 0; index < 120; index++) env.runFrame();
-  expect(colony.steps).toBe(0);
-  expect(env.lastBrush()[3]).toBe(1);
-
-  const revision = colony.terrain.revision;
-  for (let index = 0; index < PULSE_STEPS + 10; index++) {
-    gui.press("step once");
-    env.runFrame();
+  for (const tool of ["elevate", "lower", "destination"] as const) {
+    toolbar.options.onTool(tool);
+    expect(toolbar.setTool).toHaveBeenLastCalledWith(tool);
+    expect(gui.control("follow robot 1").enabled).toBe(false);
+    expect(gui.control("idle orbit").enabled).toBe(false);
+    poses.length = 0;
+    for (let index = 0; index < 30; index++) env.runFrame();
+    // The glide target snapped to the current camera, and nothing moves it while editing (the
+    // smoothing only adds rounding).
+    for (const pose of poses) pose.forEach((value, index) => expect(value).toBeCloseTo(poses[0]![index]!, 12));
   }
-  expect(mocks.manualSteps).toEqual([...Array(PULSE_STEPS).fill(true), ...Array(10).fill(false)]);
-  expect(colony.terrain.revision).toBe(revision + PULSE_STEPS);
-  expect(colony.brush.active).toBe(false);
-  // The aim overlay ends with the pulse.
-  expect(env.lastBrush()[3]).toBe(0);
+
+  toolbar.options.onTool("orbit");
+  expect(toolbar.setTool).toHaveBeenLastCalledWith("orbit");
+  expect(gui.control("follow robot 1").enabled).toBe(true);
+  expect(gui.control("idle orbit").enabled).toBe(true);
+  poses.length = 0;
+  for (let index = 0; index < 4; index++) env.runFrame();
+  expect(poses[3]![6]).toBeGreaterThan(poses[0]![6]!);
   renderer.dispose();
 });
 
-test("while paused the aim overlay shows the pending pulse or the current tool, not the last step's brush", async () => {
+test("re-picking the active tool is a no-op, and switching tools drops a held sculpt", async () => {
   const env = setup();
   const renderer = createRenderer({ canvas: env.canvas as unknown as HTMLCanvasElement });
   await renderer.ready;
-  const gui = env.gui();
-  gui.set("paused", true);
-  gui.press("lower at cursor");
+  const colony = env.colony();
+  env.canvas.dispatch("focus");
+  env.canvas.dispatch("keydown", { key: "2" });
+  expect(env.toolbar().setTool).toHaveBeenCalledOnce();
+  env.canvas.dispatch("keydown", { key: "2" });
+  expect(env.toolbar().setTool).toHaveBeenCalledOnce();
+
+  env.canvas.dispatch("keydown", { key: "Enter" });
+  const revision = colony.terrain.revision;
   env.runFrame();
-  expect(env.colony().steps).toBe(0);
-  expect(env.lastBrush()[3]).toBe(-1);
-  // Once the pulse is reset away, a tool picked while paused styles the keyboard cursor at once.
-  gui.press("reset to seed");
+  expect(colony.terrain.revision).toBeGreaterThan(revision);
+  env.toolbar().options.onTool("orbit");
+  const afterSwitch = colony.terrain.revision;
+  for (let index = 0; index < 5; index++) env.runFrame();
+  expect(colony.terrain.revision).toBe(afterSwitch);
+  expect(colony.brush.active).toBe(false);
+  renderer.dispose();
+});
+
+test("window blur releases a held keyboard sculpt", async () => {
+  const env = setup();
+  const renderer = createRenderer({ canvas: env.canvas as unknown as HTMLCanvasElement });
+  await renderer.ready;
+  const colony = env.colony();
   env.canvas.dispatch("focus");
   env.canvas.dispatch("keydown", { key: "3" });
+  env.canvas.dispatch("keydown", { key: " " });
   env.runFrame();
-  expect(env.lastBrush()[3]).toBe(-1);
-  env.canvas.dispatch("keydown", { key: "2" });
-  env.runFrame();
-  expect(env.lastBrush()[3]).toBe(1);
+  expect(colony.brush.active).toBe(true);
+  expect(colony.brush.mode).toBe("lower");
+  env.window.dispatch("blur");
+  const revision = colony.terrain.revision;
+  for (let index = 0; index < 5; index++) env.runFrame();
+  expect(colony.terrain.revision).toBe(revision);
+  expect(colony.brush.active).toBe(false);
+  renderer.dispose();
+});
+
+test("the aim overlay shows each edit tool's style, even while paused, and hides in Orbit", async () => {
+  const env = setup();
+  const renderer = createRenderer({ canvas: env.canvas as unknown as HTMLCanvasElement });
+  await renderer.ready;
+  const gui = env.gui();
+  gui.set("paused", true);
+  env.canvas.dispatch("focus");
+  for (const [key, style] of [
+    ["2", 1],
+    ["3", -1],
+    ["4", 2],
+    ["1", 0],
+  ] as const) {
+    env.canvas.dispatch("keydown", { key });
+    env.runFrame();
+    expect(env.lastBrush()[3]).toBe(style);
+  }
   expect(env.colony().steps).toBe(0);
   renderer.dispose();
 });
 
-test("a running GUI pulse lasts PULSE_STEPS fixed steps, and reset cancels it", async () => {
+test("a paused sculpt advances only with single steps", async () => {
   const env = setup();
   const renderer = createRenderer({ canvas: env.canvas as unknown as HTMLCanvasElement });
   await renderer.ready;
   const gui = env.gui();
   const colony = env.colony();
-
-  gui.press("lower at cursor");
+  gui.set("paused", true);
+  env.canvas.dispatch("focus");
+  env.canvas.dispatch("keydown", { key: "2" });
+  env.canvas.dispatch("keydown", { key: "Enter" });
   const revision = colony.terrain.revision;
-  // Catch-up frames run several steps each; the pulse counts steps, not frames.
-  env.gpu.clock.deltaTime = 4 * FIXED_DT;
   for (let index = 0; index < 20; index++) env.runFrame();
-  expect(colony.terrain.revision - revision).toBe(PULSE_STEPS);
-  expect(colony.brush.active).toBe(false);
+  expect(colony.terrain.revision).toBe(revision);
+  // The tool bar is told every frame, so it can explain why the drag does nothing yet.
+  expect(env.toolbar().setPaused).toHaveBeenLastCalledWith(true);
+  for (let index = 0; index < 3; index++) gui.press("step once");
+  expect(mocks.manualSteps).toEqual([true, true, true]);
+  expect(colony.terrain.revision).toBe(revision + 3);
+  env.canvas.dispatch("keyup", { key: "Enter" });
+  gui.press("step once");
+  expect(mocks.manualSteps.at(-1)).toBe(false);
+  expect(colony.terrain.revision).toBe(revision + 3);
+  renderer.dispose();
+});
 
-  gui.press("raise at cursor");
+test("the destination tool and the tool bar's clear button drive the colony destination", async () => {
+  const env = setup();
+  const renderer = createRenderer({ canvas: env.canvas as unknown as HTMLCanvasElement });
+  await renderer.ready;
+  const colony = env.colony();
+  env.canvas.dispatch("focus");
+  env.canvas.dispatch("keydown", { key: "4" });
+  env.canvas.dispatch("keydown", { key: "Enter" });
+  expect(colony.destination.active).toBe(true);
   env.runFrame();
-  expect(colony.brush.active).toBe(true);
-  gui.press("reset to seed");
-  const afterReset = colony.terrain.revision;
+  expect(env.toolbar().setDestination).toHaveBeenLastCalledWith(true);
+  env.toolbar().options.onClearDestination();
+  expect(colony.destination.active).toBe(false);
   env.runFrame();
-  expect(colony.brush.active).toBe(false);
-  expect(colony.terrain.revision).toBe(afterReset);
+  expect(env.toolbar().setDestination).toHaveBeenLastCalledWith(false);
+  renderer.dispose();
+});
+
+test("the tool bar's brush sliders set the sculpt radius and strength", async () => {
+  const env = setup();
+  const renderer = createRenderer({ canvas: env.canvas as unknown as HTMLCanvasElement });
+  await renderer.ready;
+  env.toolbar().options.onRadius(1.7);
+  env.toolbar().options.onStrength(0.4);
+  env.runFrame();
+  expect(env.colony().brush.radius).toBe(1.7);
+  expect(env.colony().brush.strength).toBe(0.4);
   renderer.dispose();
 });
 
@@ -448,6 +590,16 @@ test("narrow and short frames start with the panel or its folders closed", async
   first.dispose();
   guiHarness.instances.length = 0;
 
+  // The tool bar docks to the bottom below the same width, so 650–719 px close the panel too.
+  for (const width of [650, 680]) {
+    const tablet = setup({ width, height: 900 });
+    const renderer = createRenderer({ canvas: tablet.canvas as unknown as HTMLCanvasElement });
+    await renderer.ready;
+    expect(tablet.gui().closed).toBe(true);
+    renderer.dispose();
+    guiHarness.instances.length = 0;
+  }
+
   const embed = setup({ width: 832, height: 468 });
   const second = createRenderer({ canvas: embed.canvas as unknown as HTMLCanvasElement });
   await second.ready;
@@ -466,6 +618,10 @@ test("keyboard step and pause reach the colony", async () => {
   expect(env.colony().steps).toBe(1);
   env.runFrame();
   expect(env.colony().steps).toBe(1);
+  expect(env.toolbar().setPaused).toHaveBeenLastCalledWith(true);
+  env.canvas.dispatch("keydown", { key: "p", altKey: false, ctrlKey: false, metaKey: false });
+  env.runFrame();
+  expect(env.toolbar().setPaused).toHaveBeenLastCalledWith(false);
   renderer.dispose();
 });
 

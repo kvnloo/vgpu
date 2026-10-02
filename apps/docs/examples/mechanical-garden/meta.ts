@@ -3,7 +3,7 @@ export const meta = {
   title: "Mechanical Garden",
   guide: "/docs/guides/scene-composition",
   description:
-    "Six-legged robots walk a ceramic garden you can sculpt: math solves their legs with FABRIK and springs, vgpu/scene instances every part.",
+    "Quadruped robot dogs trot across a gray training ground you can elevate and lower: math solves their legs with FABRIK, vgpu/scene instances every part.",
   tags: ["3d", "robotics", "inverse-kinematics", "scene-graph", "instancing", "terrain", "shadows"],
   capabilities: [
     "webgpu",
@@ -21,12 +21,12 @@ export const meta = {
     "index.tsx",
     "renderer.ts",
     "input.ts",
+    "toolbar.ts",
     "camera.ts",
     "colony.ts",
     "robot.ts",
     "leg.ts",
     "terrain.ts",
-    "scenery.ts",
     "rig.ts",
     "meshes.ts",
     "pipeline.ts",

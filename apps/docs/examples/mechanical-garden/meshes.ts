@@ -1,11 +1,13 @@
 // Procedural meshes, built once on the CPU. Every part mesh is one merged vertex buffer whose
-// vertices carry a material code, so a robot part (an enamel shell with graphite joints and brass
-// fittings) is a single instanced draw. Leg segments run along +Y from the joint at 0 to the next
-// joint at the bone length, matching the rig locals; the hinge axis is local +X.
+// vertices carry a material code, so a robot part (a yellow cover over a black frame with a metal
+// actuator) is a single instanced draw. Leg segments run along +Y from the joint at 0 to the next
+// joint at the bone length, matching the rig locals; the hinge axis is local +X. Body space is +Z
+// forward, +Y up, +X to the robot's right. Right-side hips and femurs face their cover toward +X;
+// the left meshes are the same geometry mirrored in X.
 //
 // Vertex layout (shared with the terrain): position (3), normal (3), material (1) floats.
 
-import { COXA, FEMUR, TIBIA } from "./leg";
+import { FEMUR, HIP_OFFSET, TIBIA } from "./leg";
 import { FOOT_RADIUS } from "./robot";
 import { HALF } from "./terrain";
 
@@ -13,16 +15,14 @@ export const MESH_VERTEX_FLOATS = 7;
 
 /** Material codes; keep in sync with the MATERIAL_* constants in common.wgsl. */
 export const MATERIAL = {
-  enamel: 0,
-  accent: 1,
+  yellow: 0,
+  panel: 1,
   graphite: 2,
-  brass: 3,
-  eye: 4,
+  lens: 3,
+  led: 4,
   rubber: 5,
-  stone: 6,
-  moss: 7,
-  reed: 8,
-  plinth: 9,
+  metal: 6,
+  plinth: 7,
 } as const;
 
 export interface MeshData {
@@ -42,11 +42,11 @@ interface Frame {
 
 const AXES: Frame = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1], origin: [0, 0, 0] };
 
-function at(origin: V3, frame: Frame = AXES): Frame {
-  return { ...frame, origin };
+function at(origin: V3): Frame {
+  return { ...AXES, origin };
 }
 
-/** A frame whose +Y runs along local +X (hinge pins across a leg). */
+/** A frame whose +Y runs along local +X (actuators and hinge pins across a leg). */
 function across(origin: V3): Frame {
   return { x: [0, -1, 0], y: [1, 0, 0], z: [0, 0, 1], origin };
 }
@@ -54,6 +54,15 @@ function across(origin: V3): Frame {
 /** A frame whose +Y runs along +Z (forward). */
 function forward(origin: V3): Frame {
   return { x: [1, 0, 0], y: [0, 0, 1], z: [0, -1, 0], origin };
+}
+
+/** One cross-section of a sweep: centre (x, y, z) and elliptical half widths across X and Z. */
+interface Station {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly rx: number;
+  readonly rz: number;
 }
 
 class Builder {
@@ -92,10 +101,7 @@ class Builder {
     }
   }
 
-  /**
-   * Ellipsoid with `radii`, optionally squashed below the equator, and a radial `shape(u, v)`
-   * multiplier (u around, v from the bottom pole) for lumpy stones and moss.
-   */
+  /** Ellipsoid with `radii` and an optional radial `shape(u, v)` multiplier (u around, v up). */
   ellipsoid(frame: Frame, radii: V3, material: number, segments = 18, rings = 12, shape?: (u: number, v: number) => number): this {
     const first = this.vertices.length / MESH_VERTEX_FLOATS;
     for (let r = 0; r <= rings; r++) {
@@ -123,7 +129,9 @@ class Builder {
   rounded(frame: Frame, radii: V3, squareness: number, material: number, segments = 28, rings = 16): this {
     const first = this.vertices.length / MESH_VERTEX_FLOATS;
     const e = squareness;
-    const spow = (value: number, exponent: number) => Math.sign(value) * Math.abs(value) ** exponent;
+    // Snap trig residuals (sin 2π ≈ −2.4e-16) to zero first: a fractional power lifts them to a few
+    // thousandths, which opens the seam column and the poles into visible slits.
+    const spow = (value: number, exponent: number) => (Math.abs(value) < 1e-12 ? 0 : Math.sign(value) * Math.abs(value) ** exponent);
     for (let r = 0; r <= rings; r++) {
       const phi = Math.PI * (r / rings - 0.5);
       const cp = Math.cos(phi);
@@ -145,53 +153,68 @@ class Builder {
   }
 
   /** Tapered tube along +Y from y0 (radius r0) to y1 (radius r1), with flat caps. */
-  tube(frame: Frame, y0: number, y1: number, r0: number, r1: number, material: number, sides = 12, caps = true): this {
-    const first = this.vertices.length / MESH_VERTEX_FLOATS;
-    const slope = (r0 - r1) / (y1 - y0);
-    for (let r = 0; r <= 1; r++) {
-      const y = r === 0 ? y0 : y1;
-      const radius = r === 0 ? r0 : r1;
-      for (let s = 0; s <= sides; s++) {
-        const theta = (s / sides) * Math.PI * 2;
-        const c = Math.cos(theta);
-        const n = Math.sin(theta);
-        this.vertex(frame, [n * radius, y, c * radius], [n, slope, c], material);
-      }
-    }
-    this.grid(first, 1, sides);
-    if (caps) {
-      for (const [y, radius, up] of [
-        [y0, r0, -1],
-        [y1, r1, 1],
-      ] as const) {
-        const centre = this.vertex(frame, [0, y, 0], [0, up, 0], material);
-        for (let s = 0; s <= sides; s++) {
-          const theta = (s / sides) * Math.PI * 2;
-          this.vertex(frame, [Math.sin(theta) * radius, y, Math.cos(theta) * radius], [0, up, 0], material);
-        }
-        for (let s = 0; s < sides; s++) {
-          if (up > 0) this.indices.push(centre, centre + 1 + s, centre + 2 + s);
-          else this.indices.push(centre, centre + 2 + s, centre + 1 + s);
-        }
-      }
-    }
-    return this;
+  tube(frame: Frame, y0: number, y1: number, r0: number, r1: number, material: number, sides = 12): this {
+    return this.sweep(
+      frame,
+      [
+        { x: 0, y: y0, z: 0, rx: r0, rz: r0 },
+        { x: 0, y: y1, z: 0, rx: r1, rz: r1 },
+      ],
+      material,
+      sides,
+    );
   }
 
-  /** Thin tapered blade (a triangular prism) from the origin along a curved spine. */
-  blade(spine: (t: number) => V3, width: number, material: number, steps = 5): this {
+  /**
+   * Capped sweep through `stations` stacked along +Y, each an ellipse in the plane across the spine
+   * (local X and the spine-perpendicular in YZ). Bowed, tapered limbs and covers.
+   */
+  sweep(frame: Frame, stations: readonly Station[], material: number, sides = 16): this {
     const first = this.vertices.length / MESH_VERTEX_FLOATS;
-    for (let r = 0; r <= steps; r++) {
-      const t = r / steps;
-      const p = spine(t);
-      const w = width * (1 - t * 0.92);
-      for (let s = 0; s <= 3; s++) {
-        const theta = (s / 3) * Math.PI * 2;
-        const n: V3 = [Math.sin(theta), 0.15, Math.cos(theta)];
-        this.vertex(AXES, [p[0] + n[0] * w, p[1], p[2] + n[2] * w], n, material);
+    const across: [number, number][] = [];
+    for (let k = 0; k < stations.length; k++) {
+      const previous = stations[Math.max(0, k - 1)]!;
+      const next = stations[Math.min(stations.length - 1, k + 1)]!;
+      const ty = next.y - previous.y;
+      const tz = next.z - previous.z;
+      const length = Math.hypot(ty, tz) || 1;
+      // X × tangent: the in-plane axis perpendicular to the spine (+Z for a spine along +Y).
+      across.push([-tz / length, ty / length]);
+    }
+    const ring = (k: number, s: number): V3 => {
+      const station = stations[k]!;
+      const [by, bz] = across[k]!;
+      const theta = (s / sides) * Math.PI * 2;
+      const sx = Math.sin(theta) * station.rx;
+      const sz = Math.cos(theta) * station.rz;
+      return [station.x + sx, station.y + by * sz, station.z + bz * sz];
+    };
+    for (let k = 0; k < stations.length; k++) {
+      const station = stations[k]!;
+      const [by, bz] = across[k]!;
+      for (let s = 0; s <= sides; s++) {
+        const theta = (s / sides) * Math.PI * 2;
+        const nx = Math.sin(theta) / station.rx;
+        const nb = Math.cos(theta) / station.rz;
+        this.vertex(frame, ring(k, s), [nx, by * nb, bz * nb], material);
       }
     }
-    this.grid(first, steps, 3);
+    this.grid(first, stations.length - 1, sides);
+    for (const [k, outward] of [
+      [0, -1],
+      [stations.length - 1, 1],
+    ] as const) {
+      const station = stations[k]!;
+      const [by, bz] = across[k]!;
+      // Cap normal: ± the spine tangent (perpendicular to `across` in YZ).
+      const normal: V3 = [0, bz * outward, -by * outward];
+      const centre = this.vertex(frame, [station.x, station.y, station.z], normal, material);
+      for (let s = 0; s <= sides; s++) this.vertex(frame, ring(k, s), normal, material);
+      for (let s = 0; s < sides; s++) {
+        if (outward > 0) this.indices.push(centre, centre + 1 + s, centre + 2 + s);
+        else this.indices.push(centre, centre + 2 + s, centre + 1 + s);
+      }
+    }
     return this;
   }
 
@@ -220,112 +243,146 @@ class Builder {
   }
 }
 
-/** Small deterministic integer hash in [0, 1) (shape noise without Math.random). */
-function hash(a: number, b: number): number {
-  let h = Math.imul(a | 0, 0x27d4eb2d) ^ Math.imul(b | 0, 0x165667b1);
-  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
-  h ^= h >>> 13;
-  return (h >>> 0) / 4294967296;
+/** The same mesh reflected in X, with the winding flipped so it stays front-facing. */
+export function mirrorX(mesh: MeshData): MeshData {
+  const vertices = mesh.vertices.slice();
+  for (let v = 0; v < vertices.length; v += MESH_VERTEX_FLOATS) {
+    vertices[v] = -vertices[v]!;
+    vertices[v + 3] = -vertices[v + 3]!;
+  }
+  const indices = mesh.indices.slice();
+  for (let i = 0; i < indices.length; i += 3) {
+    const b = indices[i + 1]!;
+    indices[i + 1] = indices[i + 2]!;
+    indices[i + 2] = b;
+  }
+  return { vertices, indices };
 }
 
-/** Smooth periodic lumps for a closed surface: a few low harmonics around and along. */
-function lumps(seed: number, amount: number): (u: number, v: number) => number {
-  const terms = Array.from({ length: 4 }, (_, k) => ({ a: hash(seed, k) * Math.PI * 2, f: 1 + k, g: hash(seed, k + 9) * 2 - 1 }));
-  return (u, v) => {
-    let value = 0;
-    for (const term of terms) value += Math.sin(u * Math.PI * 2 * term.f + term.a + v * 3 * term.g) * Math.sin(v * Math.PI);
-    return 1 + (value / terms.length) * amount;
-  };
+/** Linear interpolation of station rows: `count` stations from t = 0 to 1. */
+function stations(count: number, at: (t: number) => Station): Station[] {
+  return Array.from({ length: count }, (_, k) => at(k / (count - 1)));
 }
 
-export type PartMeshes = Record<"shell" | "head" | "antenna" | "coxa" | "femur" | "tibia" | "foot", MeshData>;
+const mix = (a: number, b: number, t: number) => a + (b - a) * t;
+
+export type PartMeshes = Record<"shell" | "payload" | "hipRight" | "hipLeft" | "femurRight" | "femurLeft" | "tibia" | "foot", MeshData>;
+
+/** Chassis half extents, body space (the shell is centred on the body origin). */
+export const CHASSIS: V3 = [0.125, 0.072, 0.4];
 
 export function buildPartMeshes(): PartMeshes {
-  const { enamel, accent, graphite, brass, eye, rubber } = MATERIAL;
-  // Body: a machined chassis. A graphite keel carries the hips; a rounded-box enamel deck sits on
-  // it with an accent spine panel, brass bolts and a rear sensor pack.
+  const { yellow, panel, graphite, lens, led, rubber, metal } = MATERIAL;
+  const [cx, cy, cz] = CHASSIS;
+  // Chassis: a long yellow box with chamfered edges over a black belly, a pale top plate, a black
+  // side stripe, and the sensor heads front, sides and rear.
   const shell = new Builder()
-    .rounded(at([0, -0.03, 0]), [0.19, 0.065, 0.27], 0.3, graphite)
-    .rounded(at([0, 0.045, -0.01]), [0.215, 0.085, 0.29], 0.45, enamel, 32, 18)
-    .rounded(at([0, 0.122, -0.03]), [0.055, 0.022, 0.2], 0.3, accent, 20, 10)
-    .rounded(at([0, 0.07, -0.29]), [0.11, 0.05, 0.035], 0.35, graphite, 20, 10);
+    .rounded(at([0, 0, 0]), [cx, cy, cz], 0.2, yellow, 36, 20)
+    .rounded(at([0, -0.045, 0]), [cx - 0.007, 0.042, cz - 0.035], 0.3, graphite, 28, 14)
+    .rounded(at([0, cy - 0.001, -0.01]), [cx - 0.017, 0.011, cz - 0.06], 0.15, panel, 28, 10);
   for (const side of [-1, 1]) {
-    for (const z of [0.16, -0.2]) shell.tube(at([0.13 * side, 0.115, z]), -0.01, 0.012, 0.016, 0.014, brass, 10);
-    for (const z of [0.22, 0, -0.22]) {
-      const x = (z === 0 ? 0.2 : 0.17) * side;
-      shell.tube(at([x, -0.07, z]), 0, 0.08, 0.05, 0.05, graphite, 14);
-    }
+    shell.rounded(at([side * (cx - 0.001), -0.014, -0.03]), [0.005, 0.011, 0.27], 0.3, graphite, 12, 8);
+    // Side stereo head near the front.
+    shell.rounded(at([side * (cx - 0.001), 0.028, 0.27]), [0.005, 0.016, 0.05], 0.25, graphite, 14, 8);
+    for (const z of [0.25, 0.29]) shell.ellipsoid(at([side * (cx + 0.004), 0.028, z]), [0.003, 0.007, 0.007], lens, 10, 6);
+    for (const z of [0.3, 0, -0.3]) shell.ellipsoid(at([side * (cx - 0.024), cy + 0.012, z]), [0.005, 0.004, 0.005], graphite, 8, 5);
   }
-  // Head: a rounded-box enamel cowl, a dark glass visor and two luminous eyes on a graphite neck.
-  const head = new Builder()
-    .tube(forward([0, 0.02, -0.07]), 0, 0.08, 0.05, 0.045, graphite, 14)
-    .rounded(at([0, 0.045, 0.05]), [0.12, 0.08, 0.095], 0.4, enamel, 28, 14)
-    .rounded(at([0, 0.04, 0.115]), [0.098, 0.045, 0.04], 0.3, graphite, 24, 12)
-    .ellipsoid(at([0.046, 0.042, 0.153]), [0.032, 0.03, 0.02], eye, 16, 10)
-    .ellipsoid(at([-0.046, 0.042, 0.153]), [0.032, 0.03, 0.02], eye, 16, 10);
-  // Antenna: a brass whisker with a glowing bead.
-  const antenna = new Builder()
-    .ellipsoid(at([0, 0, 0]), [0.018, 0.014, 0.018], graphite, 10, 6)
-    .tube(AXES, 0, 0.15, 0.006, 0.004, brass, 6)
-    .ellipsoid(at([0, 0.155, 0]), [0.016, 0.016, 0.016], eye, 10, 8);
-  // Coxa: a graphite hip turret and a stout brass link out to the femur hinge.
-  const coxa = new Builder()
-    .tube(AXES, 0, COXA, 0.03, 0.028, brass, 12)
-    .rounded(at([0, 0.03, 0]), [0.045, 0.05, 0.045], 0.5, graphite, 16, 10);
-  // Femur: a hinge drum at the base, a brass strut under a rounded-box enamel armour plate.
+  // Front sensor face: a black inset in the yellow frame, a stereo lens column each side, a grille
+  // between them, and a vertical status LED (lit on payload robots).
+  shell.rounded(at([0, 0.002, cz - 0.002]), [cx - 0.025, 0.05, 0.012], 0.2, graphite, 24, 10);
+  for (const side of [-1, 1]) {
+    for (const y of [0.03, 0.01, -0.01, -0.03]) shell.ellipsoid(at([side * 0.062, y, cz + 0.009]), [0.008, 0.0065, 0.004], lens, 12, 6);
+  }
+  for (let k = 0; k < 6; k++) shell.rounded(at([0, -0.03 + k * 0.012, cz + 0.009]), [0.034, 0.0022, 0.003], 0.4, metal, 10, 4);
+  shell.rounded(at([0.088, 0.002, cz + 0.008]), [0.0035, 0.03, 0.004], 0.4, led, 8, 8);
+  // Rear sensor face.
+  shell.rounded(at([0, 0.004, -cz + 0.002]), [cx - 0.035, 0.042, 0.012], 0.2, graphite, 24, 10);
+  for (const side of [-1, 1]) shell.ellipsoid(at([side * 0.045, 0.006, -cz - 0.009]), [0.008, 0.0065, 0.004], lens, 12, 6);
+
+  // Payload (Field AI): a low black box on the top plate, corner cameras, and a lidar mast at the
+  // front with a silver ring and a slim mast on top. Origin on the top plate (rig PAYLOAD_OFFSET).
+  const payload = new Builder().rounded(at([0, 0.028, 0]), [0.1, 0.028, 0.27], 0.15, graphite, 28, 12);
+  for (const side of [-1, 1]) payload.rounded(at([side * 0.07, 0.058, 0.255]), [0.024, 0.011, 0.02], 0.3, metal, 12, 6);
+  payload
+    .tube(at([0, 0, 0.2]), 0.05, 0.09, 0.022, 0.022, graphite, 14)
+    .tube(at([0, 0, 0.2]), 0.09, 0.155, 0.042, 0.04, graphite, 24)
+    .tube(at([0, 0, 0.2]), 0.104, 0.13, 0.045, 0.045, metal, 24)
+    .tube(at([0, 0, 0.2]), 0.155, 0.168, 0.03, 0.026, graphite, 18)
+    .tube(at([0, 0, 0.2]), 0.168, 0.29, 0.011, 0.01, graphite, 10)
+    .ellipsoid(at([0, 0.245, 0.2105]), [0.004, 0.006, 0.003], led, 8, 6);
+
+  // Hip (right): the black roll actuator along Z at the pivot and the pitch actuator out along X to
+  // the femur hinge.
+  const hip = new Builder()
+    .tube(forward([0, 0, -0.06]), 0, 0.12, 0.042, 0.042, graphite, 20)
+    .tube(across([0, 0, 0]), 0.02, HIP_OFFSET - 0.03, 0.047, 0.047, metal, 22)
+    .tube(across([0, 0, 0]), HIP_OFFSET - 0.034, HIP_OFFSET - 0.026, 0.051, 0.051, graphite, 22);
+
+  // Femur (right): a thick, tapering yellow cover on the outer face over a black frame on the
+  // inner face, a rounded shoulder over the pitch actuator, and a knee pin.
   const femur = new Builder()
-    .tube(across([-0.044, 0, 0]), 0, 0.088, 0.038, 0.038, graphite, 18)
-    .tube(AXES, 0, FEMUR, 0.022, 0.02, brass, 12)
-    .rounded(at([0, FEMUR * 0.5, 0.004]), [0.034, FEMUR * 0.34, 0.04], 0.5, enamel, 20, 14);
-  // Tibia: a knee drum, an accent shin guard and a brass piston down to the ankle.
+    .tube(across([-0.03, 0, 0]), 0, 0.06, 0.046, 0.046, graphite, 22)
+    .rounded(at([0.014, 0.025, 0.006]), [0.03, 0.068, 0.058], 0.6, yellow, 22, 12)
+    .sweep(
+      AXES,
+      stations(7, (t) => ({ x: 0.009, y: mix(0.03, FEMUR - 0.015, t), z: 0.008 + 0.012 * Math.sin(Math.PI * t), rx: mix(0.031, 0.021, t), rz: mix(0.054, 0.026, t) })),
+      yellow,
+      20,
+    )
+    .sweep(
+      AXES,
+      stations(5, (t) => ({ x: -0.011, y: mix(0.02, FEMUR - 0.01, t), z: -0.006, rx: mix(0.025, 0.017, t), rz: mix(0.046, 0.024, t) })),
+      graphite,
+      16,
+    )
+    .tube(across([-0.027, FEMUR, 0]), 0, 0.054, 0.024, 0.024, graphite, 16)
+    .tube(across([0.027, FEMUR, 0]), 0, 0.006, 0.011, 0.011, metal, 12);
+
+  // Tibia: a black knee block and a flat, slightly bowed blade, deep at the knee and narrowing to
+  // the ankle, which flares into the foot cuff.
   const tibia = new Builder()
-    .tube(across([-0.04, 0, 0]), 0, 0.08, 0.034, 0.034, graphite, 18)
-    .rounded(at([0, TIBIA * 0.28, 0.004]), [0.026, TIBIA * 0.17, 0.031], 0.5, accent, 18, 12)
-    .tube(AXES, TIBIA * 0.08, TIBIA - FOOT_RADIUS * 0.5, 0.017, 0.012, brass, 12)
-    .tube(AXES, TIBIA * 0.52, TIBIA * 0.57, 0.021, 0.021, graphite, 14)
-    .tube(AXES, TIBIA - FOOT_RADIUS * 1.6, TIBIA - FOOT_RADIUS * 0.6, 0.02, 0.026, graphite, 12);
-  // Foot: a rubber pad whose underside touches the ground at the contact point.
-  const foot = new Builder().ellipsoid(at([0, 0, 0]), [FOOT_RADIUS * 1.3, FOOT_RADIUS, FOOT_RADIUS * 1.3], rubber, 16, 8);
+    .rounded(at([0, 0.022, -0.004]), [0.024, 0.044, 0.038], 0.5, graphite, 18, 10)
+    .sweep(
+      AXES,
+      stations(9, (t) => ({ x: 0, y: mix(0.02, TIBIA - FOOT_RADIUS * 0.9, t), z: -0.016 * Math.sin(Math.PI * t), rx: mix(0.019, 0.012, t), rz: mix(0.04, 0.013, t) })),
+      graphite,
+      16,
+    )
+    .tube(AXES, TIBIA - FOOT_RADIUS * 1.7, TIBIA - FOOT_RADIUS * 0.4, 0.012, 0.02, graphite, 14);
+
+  // Foot: a ribbed rubber drum across the hinge whose tread touches the ground one FOOT_RADIUS below
+  // the foot point (the ankle pin at its centre).
+  const half = FOOT_RADIUS * 0.85;
+  const foot = new Builder().sweep(
+    across([0, 0, 0]),
+    stations(13, (t) => {
+      const edge = Math.abs(t * 2 - 1);
+      const rib = 1 - 0.07 * Math.max(0, Math.cos(t * Math.PI * 8)) ** 2;
+      const radius = FOOT_RADIUS * (1 - 0.3 * edge ** 6) * rib;
+      return { x: 0, y: mix(-half, half, t), z: 0, rx: radius, rz: radius };
+    }),
+    rubber,
+    24,
+  );
+
+  const hipMesh = hip.build();
+  const femurMesh = femur.build();
   return {
     shell: shell.build(),
-    head: head.build(),
-    antenna: antenna.build(),
-    coxa: coxa.build(),
-    femur: femur.build(),
+    payload: payload.build(),
+    hipRight: hipMesh,
+    hipLeft: mirrorX(hipMesh),
+    femurRight: femurMesh,
+    femurLeft: mirrorX(femurMesh),
     tibia: tibia.build(),
     foot: foot.build(),
   };
 }
 
-export type SceneryMeshes = Record<"stone" | "moss" | "reed" | "plinth", MeshData>;
-
 /** Plinth depth below the tile rim. */
 export const PLINTH_DEPTH = 0.9;
 
-export function buildSceneryMeshes(): SceneryMeshes {
-  // Unit stone: a lumpy pebble, flattened underneath; the item scale sizes it.
-  const stoneLumps = lumps(3, 0.22);
-  const stone = new Builder().ellipsoid(at([0, 0, 0]), [1, 1, 1], MATERIAL.stone, 22, 14, (u, v) =>
-    v < 0.5 ? stoneLumps(u, v) * (0.35 + 0.65 * (v * 2) ** 2) : stoneLumps(u, v),
-  );
-  // Unit moss cushion: a soft lumpy dome.
-  const mossLumps = lumps(11, 0.3);
-  const moss = new Builder().ellipsoid(at([0, -0.25, 0]), [1, 1, 1], MATERIAL.moss, 18, 10, (u, v) =>
-    v < 0.5 ? mossLumps(u, v) * 0.3 : mossLumps(u, v),
-  );
-  // Unit reed tuft: seven curved blades of unit height around the origin.
-  const reed = new Builder();
-  for (let k = 0; k < 7; k++) {
-    const angle = k * 2.399 + hash(k, 5) * 0.6;
-    const lean = 0.08 + hash(k, 7) * 0.22;
-    const height = 0.7 + hash(k, 3) * 0.3;
-    const r0 = 0.015 + hash(k, 8) * 0.02;
-    reed.blade(
-      (t) => [Math.cos(angle) * (r0 + lean * t * t), height * t, Math.sin(angle) * (r0 + lean * t * t)],
-      0.007,
-      MATERIAL.reed,
-    );
-  }
-  const plinth = new Builder().walls(HALF, -PLINTH_DEPTH, 0.002, MATERIAL.plinth);
-  return { stone: stone.build(), moss: moss.build(), reed: reed.build(), plinth: plinth.build() };
+/** The training ground's concrete plinth walls. */
+export function buildPlinthMesh(): MeshData {
+  return new Builder().walls(HALF, -PLINTH_DEPTH, 0.002, MATERIAL.plinth).build();
 }

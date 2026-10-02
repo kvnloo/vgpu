@@ -31,7 +31,7 @@ fn fs_main(input: FloorVarying) -> @location(0) vec4f {
   // Contact shade hugging the plinth's foot.
   let outside = max(abs(p.x), abs(p.z)) - HALF;
   let contact = mix(0.35, 1.0, saturate(outside / 1.2));
-  let surface = Surface(vec3f(0.022, 0.022, 0.025), vec3f(0.03), 14.0, contact, vec3f(0.0));
+  let surface = Surface(vec3f(0.2, 0.2, 0.2), vec3f(0.03), 14.0, contact, vec3f(0.0));
   let viewDirection = normalize(camera.eye - p);
   let shadow = sunShadow(shadowMap, shadowSampler, scene.lightViewProjection, p, n);
   let lit = finish(lightSurface(surface, n, viewDirection, scene.sunDirection, scene.sunColor, scene.skyColor, shadow), scene.exposure);

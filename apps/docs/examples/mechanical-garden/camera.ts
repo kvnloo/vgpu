@@ -45,7 +45,7 @@ const FIT_ASPECT = 1.0;
 const MAX_FOV = 70;
 
 /**
- * Portrait frames (phones) would crop the garden's sides at a fixed vertical fov. Below
+ * Portrait frames (phones) would crop the tile's sides at a fixed vertical fov. Below
  * FIT_ASPECT this widens the vertical fov so the horizontal fov matches FIT_ASPECT's.
  */
 export function fitLens(base: Lens, aspect: number, out: Lens): Lens {

@@ -22,9 +22,9 @@ import {
   step,
   type Colony,
 } from "./colony";
-import { COXA, FEMUR, TIBIA } from "./leg";
-import { BODY_RADIUS, EDGE_MARGIN } from "./robot";
-import { HALF, heightAt } from "./terrain";
+import { FEMUR, HIP_OFFSET, TIBIA } from "./leg";
+import { EDGE_MARGIN, LEG_COUNT } from "./robot";
+import { CELL, GRID, gridX, HALF, heightAt } from "./terrain";
 
 function snapshot(colony: Colony): number[] {
   const values: number[] = [colony.steps, colony.count];
@@ -100,7 +100,6 @@ describe("seeded reset", () => {
     reset(used, 5, 6);
     expect(snapshot(used)).toEqual(snapshot(fresh));
     expect(Array.from(used.terrain.heights)).toEqual(Array.from(fresh.terrain.heights));
-    expect(Array.from(used.scenery.stoneWorlds)).toEqual(Array.from(fresh.scenery.stoneWorlds));
   });
 
   it("different seeds differ", () => {
@@ -135,16 +134,13 @@ describe("population", () => {
     expect(colony.robots.slice(0, 2).map((robot) => [...robot.position])).toEqual(before.slice(0, 2));
   });
 
-  it("spawns the stress preset on the tile, off the stones and apart", () => {
+  it("spawns the stress preset on the tile and apart", () => {
     const colony = createColony({ count: MAX_ROBOTS });
     let closest = Infinity;
     for (let a = 0; a < colony.count; a++) {
       const robot = colony.robots[a]!;
       expect(Math.abs(robot.position[0])).toBeLessThanOrEqual(HALF - 1 + 1e-9);
       expect(Math.abs(robot.position[2])).toBeLessThanOrEqual(HALF - 1 + 1e-9);
-      for (const stone of colony.scenery.stones) {
-        expect(Math.hypot(robot.position[0] - stone.x, robot.position[2] - stone.z)).toBeGreaterThan(stone.radius + BODY_RADIUS);
-      }
       for (let b = a + 1; b < colony.count; b++) {
         const other = colony.robots[b]!;
         closest = Math.min(closest, Math.hypot(robot.position[0] - other.position[0], robot.position[2] - other.position[2]));
@@ -172,7 +168,7 @@ describe("steering", () => {
     colony.brush.active = true;
     colony.brush.radius = 1.4;
     for (let k = 0; k < 600; k++) {
-      colony.brush.mode = k % 240 < 120 ? "raise" : "lower";
+      colony.brush.mode = k % 240 < 120 ? "elevate" : "lower";
       colony.brush.x = Math.sin(k * 0.01) * 3;
       colony.brush.z = Math.cos(k * 0.013) * 3;
       step(colony);
@@ -249,19 +245,36 @@ describe("steering", () => {
     expect(Math.hypot(first!.position[0] - second!.position[0], first!.position[2] - second!.position[2])).toBeGreaterThan(MIN_GAP * 0.9);
   });
 
-  it("re-seats scenery only where the brush sculpted", () => {
+  it("elevates and lowers the floor only under the brush, and the dogs ride the new height", () => {
     const colony = createColony({ seed: 4, count: 1 });
-    const stone = colony.scenery.stones[0]!;
-    const far = colony.scenery.stones.find((s) => Math.hypot(s.x - stone.x, s.z - stone.z) > 4)!;
-    const farBefore = Array.from(colony.scenery.stoneWorlds.subarray(colony.scenery.stones.indexOf(far) * 16, colony.scenery.stones.indexOf(far) * 16 + 16));
-    const revision = colony.scenery.revision;
-    const y = colony.scenery.stoneWorlds[13]!;
-    Object.assign(colony.brush, { active: true, mode: "raise", x: stone.x, z: stone.z, radius: 1, strength: 0.5 });
+    const robot = colony.robots[0]!;
+    const [x, z] = [robot.position[0], robot.position[2]];
+    const before = Float32Array.from(colony.terrain.heights);
+    const ground = heightAt(colony.terrain, x, z);
+    colony.paused = true;
+    Object.assign(colony.brush, { active: true, mode: "elevate", x, z, radius: 1, strength: 0.5 });
     for (let k = 0; k < 60; k++) step(colony);
-    expect(colony.scenery.revision).toBeGreaterThan(revision);
-    expect(colony.scenery.stoneWorlds[13]!).toBeGreaterThan(y + 0.1);
-    const index = colony.scenery.stones.indexOf(far);
-    expect(Array.from(colony.scenery.stoneWorlds.subarray(index * 16, index * 16 + 16))).toEqual(farBefore);
+    const raised = heightAt(colony.terrain, x, z);
+    expect(raised).toBeGreaterThan(ground + 0.1);
+    // Cells farther than the radius (plus one cell of interpolation) never move.
+    let moved = 0;
+    for (let j = 0; j < GRID; j++) {
+      for (let i = 0; i < GRID; i++) {
+        const k = j * GRID + i;
+        if (colony.terrain.heights[k] === before[k]) continue;
+        moved++;
+        expect(Math.hypot(gridX(i) - x, gridX(j) - z)).toBeLessThan(1 + CELL);
+      }
+    }
+    expect(moved).toBeGreaterThan(0);
+    // The body follows the raised floor with every foot still planted on it.
+    expect(robot.position[1] - raised).toBeGreaterThan(0.3);
+    for (const foot of robot.feet) {
+      if (foot.planted) expect(Math.abs(foot.position[1] - heightAt(colony.terrain, foot.position[0], foot.position[2]))).toBeLessThan(0.08);
+    }
+    colony.brush.mode = "lower";
+    for (let k = 0; k < 120; k++) step(colony);
+    expect(heightAt(colony.terrain, x, z)).toBeLessThan(raised - 0.1);
   });
 
   it("keeps every bone length through a stress walk without needing a rejected solve", () => {
@@ -277,7 +290,7 @@ describe("steering", () => {
         for (const leg of colony.robots[index]!.legs) {
           worst = Math.max(
             worst,
-            Math.abs(distance(leg.spec.hip, leg.femurBase) - COXA),
+            Math.abs(distance(leg.spec.hip, leg.femurBase) - HIP_OFFSET),
             Math.abs(distance(leg.femurBase, leg.knee) - FEMUR),
             Math.abs(distance(leg.knee, leg.foot) - TIBIA),
           );
@@ -293,7 +306,7 @@ describe("steering", () => {
 describe("planted feet in a turning colony", () => {
   // The solved foot, carried back to world space, must stay on the stored world contact of every
   // planted foot. The legs' own residual cannot see a body that turned a planted foot out of its
-  // coxa sector: the goal is clamped and solved exactly, but it is no longer where the foot is.
+  // leg sector: the goal is clamped and solved exactly, but it is no longer where the foot is.
   const worldFoot = (out: number[], robot: Colony["robots"][number], leg: number) => {
     const [x, y, z, w] = robot.rotation;
     const p = robot.legs[leg]!.foot;
@@ -323,7 +336,7 @@ describe("planted feet in a turning colony", () => {
           const robot = colony.robots[index]!;
           turned += Math.abs(robot.heading.value - headings[index]!);
           headings[index] = robot.heading.value;
-          for (let leg = 0; leg < 6; leg++) {
+          for (let leg = 0; leg < LEG_COUNT; leg++) {
             const foot = robot.feet[leg]!;
             if (!foot.planted) continue;
             worldFoot(world, robot, leg);
@@ -348,7 +361,7 @@ describe("corner and edge destinations", () => {
   const plantedError = (robot: Colony["robots"][number]) => {
     const [x, y, z, w] = robot.rotation;
     let worst = 0;
-    for (let leg = 0; leg < 6; leg++) {
+    for (let leg = 0; leg < LEG_COUNT; leg++) {
       const foot = robot.feet[leg]!;
       if (!foot.planted) continue;
       const p = robot.legs[leg]!.foot;
@@ -443,8 +456,7 @@ describe("corner and edge destinations", () => {
   });
 
   // Two walkers each standing near the other's slot block each other nose to nose; without a swap
-  // they wait for separation to slide them past (11–15 s here, and in a corridor between stones
-  // they never pass).
+  // they wait for separation to slide them past.
   for (const [seed, x, z] of [[7, 0, 0], [3, 5, -6.5], [11, -6, 6]] as const) {
     it(`seed ${seed}: two walkers facing each other's slots at (${x}, ${z}) trade slots instead of blocking`, () => {
       const colony = createColony({ seed, count: 2 });

@@ -5,14 +5,16 @@ import { dolly, orbit, type OrbitRig } from "vgpu/scene";
 
 import { clampToTile } from "./terrain";
 
-export type Tool = "orbit" | "raise" | "lower" | "destination";
-export const TOOLS: readonly Tool[] = ["orbit", "raise", "lower", "destination"];
+export type Tool = "orbit" | "elevate" | "lower" | "destination";
+export const TOOLS: readonly Tool[] = ["orbit", "elevate", "lower", "destination"];
+
+/** Every tool but orbit edits the ground; the camera then moves only by wheel or pinch zoom. */
+export function isEditTool(tool: Tool): boolean {
+  return tool !== "orbit";
+}
 
 export const ORBIT_LIMITS = { minPitch: 0.16, maxPitch: 1.42, minDistance: 1.6, maxDistance: 30 } as const;
 
-const TAP_DISTANCE = 6;
-/** Longest press, in ms, that still counts as a tap (sets the destination). */
-const TAP_DURATION = 600;
 const PAN_LIMIT = 7;
 /** Keyboard cursor step in world units (Shift moves faster). */
 export const CURSOR_STEP = 0.15;
@@ -43,6 +45,11 @@ export interface GardenInput {
   readonly engaged: boolean;
   /** The keyboard drives the cursor (the canvas has focus in a tool mode). */
   readonly keyboard: boolean;
+  /**
+   * Drop every press: pointers, two-finger gestures and a held Enter/Space. The renderer calls it
+   * when the tool changes or the window loses focus, so no gesture outlives the tool it began in.
+   */
+  cancel(): void;
   dispose(): void;
 }
 
@@ -57,12 +64,14 @@ export interface InputElement {
 interface TrackedPointer {
   x: number;
   y: number;
-  readonly startX: number;
-  readonly startY: number;
-  readonly startTime: number;
   readonly type: string;
-  /** What this press does: orbit the camera, pan it, sculpt, or aim a destination. */
-  action: "orbit" | "pan" | "sculpt" | "aim";
+  /**
+   * What this press does: orbit or pan the camera (orbit tool only), sculpt or aim a destination
+   * (edit tools), or nothing (the finger left over after a two-finger gesture).
+   */
+  action: "orbit" | "pan" | "sculpt" | "aim" | "none";
+  /** A sculpt or aim press is over the tile (a miss stays pending until the pointer reaches it). */
+  onTile: boolean;
 }
 
 /** Ground-plane pan along the camera's horizontal axes, bounded to the tile. */
@@ -74,11 +83,13 @@ export function panGround(goal: OrbitRig, right: number, forward: number): void 
 }
 
 /**
- * Orbit tool: drag orbits, right/Shift-drag pans. Raise/lower: drag sculpts where it presses the
- * terrain. Destination: a tap sends the robots there, a drag orbits. In every tool the wheel and a
- * pinch zoom and a two-finger drag orbits. Keys on the focused canvas: 1–4 pick the tool, arrows
+ * The tools are exclusive. Orbit: drag orbits, right/Shift-drag pans, two fingers orbit and pinch.
+ * Elevate/lower: a press sculpts wherever it is over the terrain, and only sculpts — a press that
+ * misses the tile waits until it reaches it, and modifiers or the right button never move the
+ * camera. Destination: press and drag to aim, release to send the robots. The wheel zooms in every
+ * tool; in edit tools two fingers only pinch. Keys on the focused canvas: 1–4 pick the tool, arrows
  * move the cursor (orbit in the orbit tool), Enter/Space sculpt while held or set the destination,
- * +/- zoom, P pauses and . steps once.
+ * +/- zoom, P pauses and . steps once. Pointercancel, lost capture and blur end a press.
  */
 export function installInput(element: InputElement, goal: OrbitRig, options: GardenInputOptions): GardenInput {
   let disposed = false;
@@ -89,20 +100,22 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
    * by any pointer press. A tap focuses the canvas too, and must not leave the keyboard cursor up.
    */
   let keyboardDriven = false;
-  let keyHeld = false;
+  /** A press came before the next focus event: that focus is the press's, not the keyboard's. */
+  let pressFocus = false;
+  /** Enter and Space while they are held to sculpt: the press lasts until both are up. */
+  const heldKeys = new Set<string>();
   const cursor: Cursor = { x: 0, z: 0, visible: false, pressed: false };
   const pointers = new Map<number, TrackedPointer>();
   const hit: [number, number] = [0, 0];
   let pinchDistance = 0;
   let pinchX = 0;
   let pinchY = 0;
-  let multiTouch = false;
   let pointerCursor = false;
 
   const release = (pointerId: number) => {
     if (element.hasPointerCapture?.(pointerId)) element.releasePointerCapture?.(pointerId);
   };
-  const keyboardCursor = () => focused && keyboardDriven && options.tool() !== "orbit";
+  const keyboardCursor = () => focused && keyboardDriven && isEditTool(options.tool());
 
   const aimAt = (clientX: number, clientY: number): boolean => {
     if (!options.pick(clientX, clientY, hit)) return false;
@@ -111,10 +124,13 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
     return true;
   };
   const refreshVisibility = () => {
-    cursor.visible = options.tool() !== "orbit" && (pointerCursor || keyboardCursor());
+    cursor.visible = isEditTool(options.tool()) && (pointerCursor || keyboardCursor());
   };
-  const releaseSculpt = () => {
-    cursor.pressed = keyHeld;
+  /** Sculpting continues while a sculpt press is over the tile or Enter/Space is held. */
+  const refreshPressed = () => {
+    let pressing = heldKeys.size > 0;
+    for (const pointer of pointers.values()) pressing ||= pointer.action === "sculpt" && pointer.onTile;
+    cursor.pressed = pressing;
   };
 
   const pinchState = () => {
@@ -124,32 +140,40 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
 
   const pointerDown: EventListener = (event) => {
     const value = event as PointerEvent;
-    if (value.pointerType === "mouse" && value.button !== 0 && value.button !== 2) return;
-    keyboardDriven = false;
     const tool = options.tool();
-    let action: TrackedPointer["action"] = value.button === 2 || value.shiftKey ? "pan" : "orbit";
-    if (action === "orbit" && pointers.size === 0 && tool !== "orbit" && aimAt(value.clientX, value.clientY)) {
+    const edit = isEditTool(tool);
+    // Any press, even one ignored below, hands the cursor to the pointer, and the focus it causes
+    // next is not keyboard focus.
+    keyboardDriven = false;
+    pressFocus = true;
+    // The right button pans in the orbit tool and does nothing in an edit tool.
+    if (value.pointerType === "mouse" && value.button !== 0 && (edit || value.button !== 2)) {
+      refreshVisibility();
+      return;
+    }
+    if (pointers.size >= 2) return;
+    let action: TrackedPointer["action"];
+    let onTile = false;
+    if (pointers.size === 1) {
+      // A second finger turns the press into a two-finger gesture: it stops sculpting and aiming,
+      // and the finger left after it lifts does nothing until every finger is up.
+      action = "none";
+      for (const pointer of pointers.values()) pointer.action = "none";
+    } else if (!edit) {
+      action = value.button === 2 || value.shiftKey ? "pan" : "orbit";
+    } else {
       action = tool === "destination" ? "aim" : "sculpt";
-      pointerCursor = true;
+      onTile = aimAt(value.clientX, value.clientY);
+      pointerCursor = onTile;
     }
-    pointers.set(value.pointerId, {
-      x: value.clientX,
-      y: value.clientY,
-      startX: value.clientX,
-      startY: value.clientY,
-      startTime: value.timeStamp,
-      type: value.pointerType,
-      action,
-    });
-    element.setPointerCapture?.(value.pointerId);
-    if (action === "sculpt") cursor.pressed = true;
-    if (pointers.size === 2) {
-      // A second finger turns any press into a camera gesture and stops sculpting.
-      multiTouch = true;
-      for (const pointer of pointers.values()) pointer.action = "orbit";
-      releaseSculpt();
-      ({ distance: pinchDistance, x: pinchX, y: pinchY } = pinchState());
+    pointers.set(value.pointerId, { x: value.clientX, y: value.clientY, type: value.pointerType, action, onTile });
+    try {
+      element.setPointerCapture?.(value.pointerId);
+    } catch {
+      // The pointer already ended (or was synthesised): track it uncaptured; its up still ends it.
     }
+    if (pointers.size === 2) ({ distance: pinchDistance, x: pinchX, y: pinchY } = pinchState());
+    refreshPressed();
     refreshVisibility();
   };
 
@@ -158,7 +182,7 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
     const pointer = pointers.get(value.pointerId);
     if (!pointer) {
       // Mouse hover shows the brush where it would land.
-      if (value.pointerType === "mouse" && pointers.size === 0 && options.tool() !== "orbit") {
+      if (value.pointerType === "mouse" && pointers.size === 0 && isEditTool(options.tool())) {
         pointerCursor = aimAt(value.clientX, value.clientY);
         refreshVisibility();
       }
@@ -171,21 +195,20 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
     if (pointers.size >= 2) {
       const next = pinchState();
       if (pinchDistance > 0 && next.distance > 0) dolly(goal, pinchDistance / next.distance, ORBIT_LIMITS);
-      orbit(goal, -(next.x - pinchX) * 0.005, (next.y - pinchY) * 0.004, ORBIT_LIMITS);
+      if (!isEditTool(options.tool())) orbit(goal, -(next.x - pinchX) * 0.005, (next.y - pinchY) * 0.004, ORBIT_LIMITS);
       ({ distance: pinchDistance, x: pinchX, y: pinchY } = next);
       return;
     }
-    if (pointer.action === "sculpt") {
-      // Off the tile the brush holds its last spot; it never sculpts the sky.
-      pointerCursor = aimAt(value.clientX, value.clientY) || pointerCursor;
+    if (pointer.action === "sculpt" || pointer.action === "aim") {
+      // Off the tile the brush holds its last spot and stops; it never sculpts the sky.
+      pointer.onTile = aimAt(value.clientX, value.clientY);
+      pointerCursor ||= pointer.onTile;
+      refreshPressed();
+      refreshVisibility();
       return;
     }
-    if (pointer.action === "aim") {
-      if (Math.hypot(value.clientX - pointer.startX, value.clientY - pointer.startY) < TAP_DISTANCE) return;
-      pointer.action = "orbit";
-    }
     if (pointer.action === "pan") panGround(goal, -deltaX * goal.distance * 0.0016, deltaY * goal.distance * 0.0016);
-    else orbit(goal, -deltaX * 0.005, deltaY * 0.004, ORBIT_LIMITS);
+    else if (pointer.action === "orbit") orbit(goal, -deltaX * 0.005, deltaY * 0.004, ORBIT_LIMITS);
   };
 
   const pointerUp: EventListener = (event) => {
@@ -194,18 +217,22 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
     if (!pointer) return;
     pointers.delete(value.pointerId);
     release(value.pointerId);
-    const tap =
-      event.type === "pointerup" &&
-      !multiTouch &&
-      pointer.action === "aim" &&
-      value.timeStamp - pointer.startTime < TAP_DURATION &&
-      Math.hypot(value.clientX - pointer.startX, value.clientY - pointer.startY) < TAP_DISTANCE;
-    if (pointer.action === "sculpt" || pointers.size === 0) releaseSculpt();
-    if (pointers.size === 0) multiTouch = false;
-    if (pointers.size === 1) pinchDistance = 0;
-    if (tap) options.onDestination(cursor.x, cursor.z);
+    if (pointers.size < 2) pinchDistance = 0;
+    // A destination is sent by a release over the tile; a cancelled or lost press sends nothing.
+    if (event.type === "pointerup" && pointer.action === "aim" && pointer.onTile) options.onDestination(cursor.x, cursor.z);
     // A finger lifting leaves nothing hovering.
     if (pointer.type !== "mouse") pointerCursor = false;
+    refreshPressed();
+    refreshVisibility();
+  };
+
+  const cancel = () => {
+    for (const pointerId of pointers.keys()) release(pointerId);
+    pointers.clear();
+    pinchDistance = 0;
+    heldKeys.clear();
+    pointerCursor = false;
+    refreshPressed();
     refreshVisibility();
   };
 
@@ -227,15 +254,15 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
   };
   const focus: EventListener = () => {
     focused = true;
-    // Focus that a press caused (the pointer is already tracked) is not keyboard focus.
-    if (pointers.size === 0) keyboardDriven = true;
+    // Focus that a press caused (tracked or ignored) is not keyboard focus.
+    if (!pressFocus) keyboardDriven = true;
+    pressFocus = false;
     refreshVisibility();
   };
   const blur: EventListener = () => {
     focused = false;
-    keyHeld = false;
-    releaseSculpt();
-    refreshVisibility();
+    pressFocus = false;
+    cancel();
   };
 
   const keyDown: EventListener = (event) => {
@@ -248,7 +275,8 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
     if (index >= 0) {
       options.onTool(TOOLS[index]!);
     } else if (value.key === "p" || value.key === "P") {
-      options.onPause();
+      // Holding P must not flicker between paused and running on every auto-repeat.
+      if (!value.repeat) options.onPause();
     } else if (value.key === ".") {
       options.onStep();
     } else if (value.key === "+" || value.key === "=") {
@@ -258,7 +286,7 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
     } else if (value.key.startsWith("Arrow")) {
       const dx = value.key === "ArrowLeft" ? -1 : value.key === "ArrowRight" ? 1 : 0;
       const dy = value.key === "ArrowUp" ? 1 : value.key === "ArrowDown" ? -1 : 0;
-      if (tool === "orbit") {
+      if (!isEditTool(tool)) {
         orbit(goal, -dx * 0.12, -dy * 0.08, ORBIT_LIMITS);
       } else {
         // Up moves away from the camera, right moves to the camera's right.
@@ -272,11 +300,12 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
     } else if (value.key === "Enter" || value.key === " ") {
       if (tool === "destination") {
         if (!value.repeat) options.onDestination(cursor.x, cursor.z);
-      } else if (tool !== "orbit") {
-        keyHeld = true;
-        cursor.pressed = true;
+      } else if (isEditTool(tool)) {
+        heldKeys.add(value.key);
+        refreshPressed();
       } else {
-        handled = false;
+        // Orbit has no use for Enter; Space is still kept from scrolling the page under the demo.
+        handled = value.key === " ";
       }
     } else {
       handled = false;
@@ -288,9 +317,8 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
   };
   const keyUp: EventListener = (event) => {
     const value = event as KeyboardEvent;
-    if (value.key !== "Enter" && value.key !== " ") return;
-    keyHeld = false;
-    if (![...pointers.values()].some((pointer) => pointer.action === "sculpt")) cursor.pressed = false;
+    if (!heldKeys.delete(value.key)) return;
+    refreshPressed();
   };
 
   const listeners = [
@@ -298,6 +326,7 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
     ["pointermove", pointerMove, undefined],
     ["pointerup", pointerUp, undefined],
     ["pointercancel", pointerUp, undefined],
+    ["lostpointercapture", pointerUp, undefined],
     ["pointerenter", pointerEnter, undefined],
     ["pointerleave", pointerLeave, undefined],
     ["contextmenu", contextMenu, undefined],
@@ -324,11 +353,12 @@ export function installInput(element: InputElement, goal: OrbitRig, options: Gar
   return {
     cursor,
     get engaged() {
-      return hovering || pointers.size > 0 || keyHeld;
+      return hovering || pointers.size > 0 || heldKeys.size > 0;
     },
     get keyboard() {
       return keyboardCursor() && !pointerCursor;
     },
+    cancel,
     dispose(): void {
       if (disposed) return;
       disposed = true;

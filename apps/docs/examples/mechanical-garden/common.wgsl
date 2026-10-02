@@ -1,7 +1,7 @@
 import { linearToSrgb3, tonemapAces } from "@vgpu/wgsl-std/color";
 import { saturate } from "@vgpu/wgsl-std/math";
 
-// Shared by every garden shader. Each shader declares its own bindings with these structs:
+// Shared by every training-ground shader. Each shader declares its own bindings with these structs:
 // @group(0) @binding(0) camera, @binding(1) scene, @binding(2) shadowMap, @binding(3) shadowSampler.
 
 export struct Camera {
@@ -21,7 +21,7 @@ export struct Scene {
   skyColor: vec3f,
   // Robots whose bodies darken the ground under them (the first contactCount entries of contacts).
   contactCount: u32,
-  // Brush: x, z, radius, mode (0 hidden, 1 raise, -1 lower, 2 destination aim).
+  // Brush: x, z, radius, mode (0 hidden, 1 elevate, -1 lower, 2 destination aim).
   brush: vec4f,
   // Destination: x, z, shown (0/1), seconds since it was set.
   destination: vec4f,
@@ -30,33 +30,21 @@ export struct Scene {
 }
 
 export fn backgroundColor(height: f32) -> vec3f {
-  // Display-encoded studio backdrop (the scene target stores tone-mapped sRGB).
-  return mix(vec3f(0.055, 0.058, 0.066), vec3f(0.11, 0.115, 0.125), saturate(height));
+  // Display-encoded neutral gray backdrop (the scene target stores tone-mapped sRGB).
+  return mix(vec3f(0.5, 0.505, 0.51), vec3f(0.66, 0.665, 0.67), saturate(height));
 }
 
 // Material codes carried per vertex; keep in sync with MATERIAL in meshes.ts.
-export const MATERIAL_ENAMEL: u32 = 0u;
-export const MATERIAL_ACCENT: u32 = 1u;
+export const MATERIAL_YELLOW: u32 = 0u;
+export const MATERIAL_PANEL: u32 = 1u;
 export const MATERIAL_GRAPHITE: u32 = 2u;
-export const MATERIAL_BRASS: u32 = 3u;
-export const MATERIAL_EYE: u32 = 4u;
+export const MATERIAL_LENS: u32 = 3u;
+export const MATERIAL_LED: u32 = 4u;
 export const MATERIAL_RUBBER: u32 = 5u;
-export const MATERIAL_STONE: u32 = 6u;
-export const MATERIAL_MOSS: u32 = 7u;
-export const MATERIAL_REED: u32 = 8u;
-export const MATERIAL_PLINTH: u32 = 9u;
+export const MATERIAL_METAL: u32 = 6u;
+export const MATERIAL_PLINTH: u32 = 7u;
 
 export const SHADOW_TEXEL: f32 = 1.0 / 2048.0;
-
-/** Reeds bend with a slow breeze; the offset grows with the square of the blade height. */
-export fn swayed(position: vec3f, material: f32, variant: f32, time: f32) -> vec3f {
-  if (u32(material + 0.5) != MATERIAL_REED) {
-    return position;
-  }
-  let phase = variant * 6.2831 + time * 1.3;
-  let bend = position.y * position.y * 0.09;
-  return position + vec3f(sin(phase) * bend, 0.0, cos(phase * 0.8 + 1.0) * bend * 0.6);
-}
 
 /** 3×3 PCF on the sun shadow map. Uses explicit-level comparisons so it may run in any branch. */
 export fn sunShadow(
@@ -83,16 +71,16 @@ export fn sunShadow(
   return lit / 9.0;
 }
 
-/** Studio light: a cool sky dome above and a warm bounce off the floor below. */
+/** Studio light: a neutral sky dome above and a gray bounce off the concrete below. */
 export fn ambient(normal: vec3f, sky: vec3f) -> vec3f {
   let up = normal.y * 0.5 + 0.5;
-  return mix(vec3f(0.16, 0.12, 0.09), sky, up);
+  return mix(vec3f(0.14, 0.14, 0.14), sky, up);
 }
 
 /** Surface response: diffuse plus a Blinn-Phong lobe with Schlick fresnel. */
 export struct Surface {
   albedo: vec3f,
-  // Specular colour at normal incidence (dielectrics ~0.04, brass its own tint).
+  // Specular colour at normal incidence (dielectrics ~0.04, metals their own tint).
   specular: vec3f,
   // Blinn-Phong exponent.
   shininess: f32,
@@ -120,7 +108,7 @@ export fn lightSurface(
   let diffuse = surface.albedo * (sunColor * ndl * shadow + ambient(n, sky) * surface.occlusion);
   // A soft reflection of the studio dome: brighter toward the top, faint toward the floor.
   let reflected = reflect(-viewDirection, n);
-  let dome = mix(vec3f(0.05, 0.045, 0.04), sky * 1.3, smoothstep(-0.2, 0.8, reflected.y));
+  let dome = mix(vec3f(0.06), sky * 1.3, smoothstep(-0.2, 0.8, reflected.y));
   let gloss = saturate((surface.shininess - 8.0) / 120.0);
   return diffuse + sunColor * fresnel * lobe + fresnel * dome * gloss * surface.occlusion + surface.emission;
 }

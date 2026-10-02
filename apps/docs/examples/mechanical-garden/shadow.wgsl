@@ -1,5 +1,5 @@
 import { instanceWorldMatrix, transformPosition } from "@vgpu/wgsl-std/scene";
-import { Scene, swayed } from "./common.wgsl";
+import { Scene } from "./common.wgsl";
 
 @group(0) @binding(1) var<uniform> scene: Scene;
 
@@ -18,8 +18,7 @@ struct ShadowInput {
 @vertex
 fn vs_main(input: ShadowInput) -> @builtin(position) vec4f {
   let world = instanceWorldMatrix(input.world0, input.world1, input.world2, input.world3);
-  let local = swayed(input.position, input.material, input.style.z, scene.time);
-  return scene.lightViewProjection * vec4f(transformPosition(world, local), 1.0);
+  return scene.lightViewProjection * vec4f(transformPosition(world, input.position), 1.0);
 }
 
 // Terrain casts too (its own vertex layout: no instance attributes).
