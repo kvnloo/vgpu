@@ -33,6 +33,20 @@ export function bindingResourceOf(value: unknown): BindingResourceProvider | und
   return typeof method === "function" ? (value as BindingResourceProvider) : undefined;
 }
 
+/** @internal Implemented by canvas-backed surfaces so resource binding can reject them nominally. */
+export const SURFACE_TARGET = Symbol("vgpu.surfaceTarget");
+
+/** A canvas Surface marker kept here so compute-only binding code does not import surface.ts. */
+export interface SurfaceTargetProtocol {
+  readonly [SURFACE_TARGET]: true;
+}
+
+/** Recognizes a canvas Surface without touching any of its attachment getters. */
+export function isSurfaceTarget(value: unknown): value is SurfaceTargetProtocol {
+  return typeof value === "object" && value !== null
+    && (value as Partial<SurfaceTargetProtocol>)[SURFACE_TARGET] === true;
+}
+
 /** @internal Resolves named geometry attributes against reflected shader inputs. */
 export const geometryLayoutResolver = Symbol("vgpu.geometry.layoutResolver");
 
