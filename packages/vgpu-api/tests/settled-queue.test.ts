@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { createMockGPUDevice } from "@vgpu/core";
-import { draw, frame, init, initFromDevice, target, VGPUError } from "../src/mock.ts";
+import { compute, draw, frame, init, initFromDevice, target, VGPUError } from "../src/mock.ts";
 import { submittedWorkDone } from "../src/claim-validation.ts";
 import { kernelOf } from "../src/kernel.ts";
 
@@ -16,7 +16,7 @@ afterEach(() => vi.restoreAllMocks());
 
 test("settled captures a queue fence synchronously and waits for a plain draw", async () => {
   const gpu = await init();
-  const fence = deferred<void>();
+  const fence = deferred<undefined>();
   const onSubmittedWorkDone = vi.spyOn(gpu.gpu.queue, "onSubmittedWorkDone").mockReturnValue(fence.promise);
 
   try {
@@ -26,14 +26,14 @@ test("settled captures a queue fence synchronously and waits for a plain draw", 
     const settled = gpu.settled().then(() => { complete = true; });
 
     expect(onSubmittedWorkDone).toHaveBeenCalledOnce();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await nextTurn();
     expect(complete).toBe(false);
 
-    fence.resolve();
+    fence.resolve(undefined);
     await settled;
     expect(complete).toBe(true);
   } finally {
-    fence.resolve();
+    fence.resolve(undefined);
     gpu.dispose();
   }
 });
@@ -43,7 +43,7 @@ test("settled does not extend its snapshot to later submissions or pipeline work
   const colorTarget = target(gpu, { size: [4, 4] });
   const drawable = draw(gpu, { shader: SHADER });
   await gpu.settled();
-  const fence = deferred<void>();
+  const fence = deferred<undefined>();
   const pipeline = deferred<GPURenderPipeline>();
   const onSubmittedWorkDone = vi.spyOn(gpu.gpu.queue, "onSubmittedWorkDone").mockReturnValue(fence.promise);
   vi.spyOn(gpu.gpu, "createRenderPipelineAsync").mockReturnValue(pipeline.promise);
@@ -59,20 +59,20 @@ test("settled does not extend its snapshot to later submissions or pipeline work
       return value;
     });
 
-    fence.resolve();
+    fence.resolve(undefined);
     await settled;
     expect(compiled).toBe(false);
 
     pipeline.resolve({} as GPURenderPipeline);
     await compilation;
   } finally {
-    fence.resolve();
+    fence.resolve(undefined);
     pipeline.resolve({} as GPURenderPipeline);
     gpu.dispose();
   }
 });
 
-test("an already-lost device skips a new fence but retains existing deliveries", async () => {
+test.each(["delivery", "source"] as const)("an already-lost device retains existing waits when the %s resolves first", async (first) => {
   const { device, lose } = losableDevice();
   const gpu = await initFromDevice(device);
   const delivery = deferred<void>();
@@ -89,14 +89,17 @@ test("an already-lost device skips a new fence but retains existing deliveries",
     let complete = false;
     const settled = gpu.settled().then(() => { complete = true; });
     expect(onSubmittedWorkDone).not.toHaveBeenCalled();
-    await Promise.resolve();
+    await nextTurn();
     expect(complete).toBe(false);
 
-    delivery.resolve();
-    await Promise.resolve();
+    if (first === "delivery") delivery.resolve();
+    else source.resolve();
+    await nextTurn();
     expect(complete).toBe(false);
-    source.resolve();
+    if (first === "delivery") source.resolve();
+    else delivery.resolve();
     await settled;
+    expect(complete).toBe(true);
   } finally {
     delivery.resolve();
     source.resolve();
@@ -115,7 +118,7 @@ test("an already-disposed gpu skips a new fence but retains existing deliveries"
   let complete = false;
   const settled = gpu.settled().then(() => { complete = true; });
   expect(onSubmittedWorkDone).not.toHaveBeenCalled();
-  await Promise.resolve();
+  await nextTurn();
   expect(complete).toBe(false);
 
   delivery.resolve();
@@ -124,36 +127,36 @@ test("an already-disposed gpu skips a new fence but retains existing deliveries"
 
 test("dispose after capture does not release the queue fence early", async () => {
   const gpu = await init();
-  const fence = deferred<void>();
+  const fence = deferred<undefined>();
   const onSubmittedWorkDone = vi.spyOn(gpu.gpu.queue, "onSubmittedWorkDone").mockReturnValue(fence.promise);
 
   const settled = pendingState(gpu.settled());
   expect(onSubmittedWorkDone).toHaveBeenCalledOnce();
   gpu.dispose();
-  await Promise.resolve();
+  await nextTurn();
   expect(settled.complete()).toBe(false);
 
-  fence.resolve();
+  fence.resolve(undefined);
   await settled.promise;
 });
 
 test("loss after capture does not release the queue fence early", async () => {
   const { device, lose } = losableDevice();
   const gpu = await initFromDevice(device);
-  const fence = deferred<void>();
+  const fence = deferred<undefined>();
   const onSubmittedWorkDone = vi.spyOn(device.queue, "onSubmittedWorkDone").mockReturnValue(fence.promise);
 
   try {
     const settled = pendingState(gpu.settled());
     expect(onSubmittedWorkDone).toHaveBeenCalledOnce();
     lose();
-    await Promise.resolve();
+    await nextTurn();
     expect(settled.complete()).toBe(false);
 
-    fence.resolve();
+    fence.resolve(undefined);
     await settled.promise;
   } finally {
-    fence.resolve();
+    fence.resolve(undefined);
     gpu.dispose();
   }
 });
@@ -207,6 +210,56 @@ test("settled fulfills when a mock omits onSubmittedWorkDone", async () => {
   }
 });
 
+test("compute dispatch reports a synchronous queue-completion throw exactly once", async () => {
+  const gpu = await init();
+  const simulation = compute(gpu, "@compute @workgroup_size(1) fn main() {}", { label: "syncFenceDispatch" });
+  const nativeError = new Error("synchronous compute fence failure");
+  const errors: unknown[] = [];
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  gpu.onError((error) => errors.push(error));
+  process.on("unhandledRejection", onUnhandled);
+  vi.spyOn(gpu.gpu.queue, "onSubmittedWorkDone").mockImplementation(() => { throw nativeError; });
+
+  try {
+    expect(() => simulation.dispatch(1)).not.toThrow();
+    await gpu.settled();
+    await nextTurn();
+    expect(errors).toEqual([
+      expect.objectContaining({
+        code: "VGPU-COMPUTE-VALIDATION",
+        where: "syncFenceDispatch.completion",
+        cause: nativeError,
+      }),
+    ]);
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    gpu.dispose();
+  }
+});
+
+test("settled fulfills when a settled source throws without reporting an error", async () => {
+  const gpu = await init();
+  const errors: unknown[] = [];
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  const release = kernelOf(gpu).registerSettledSource(() => { throw new Error("broken settled source"); });
+  gpu.onError((error) => errors.push(error));
+  process.on("unhandledRejection", onUnhandled);
+
+  try {
+    await expect(gpu.settled()).resolves.toBeUndefined();
+    await nextTurn();
+    expect(errors).toEqual([]);
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    release();
+    gpu.dispose();
+  }
+});
+
 test("settled waits for a captured source through its associated error delivery", async () => {
   const gpu = await init();
   const source = deferred<void>();
@@ -218,7 +271,7 @@ test("settled waits for a captured source through its associated error delivery"
 
   try {
     const settled = pendingState(gpu.settled());
-    await Promise.resolve();
+    await nextTurn();
     expect(settled.complete()).toBe(false);
 
     source.resolve();
@@ -260,6 +313,10 @@ function pendingState<T>(promise: Promise<T>) {
     promise: promise.finally(() => { complete = true; }),
     complete: () => complete,
   };
+}
+
+function nextTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function losableDevice() {
