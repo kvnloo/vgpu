@@ -351,7 +351,7 @@ The signature here is `{ colors: [canvasSurface.format], depth: "depth24plus", s
 
 1. **Prepare.** Allocate the replacement MSAA color and depth at the new size. If an allocation throws synchronously, vgpu destroys the partial replacements and rethrows; the canvas size, DPR, attachments, and existing bindings stay exactly as they were, and no callback runs.
 2. **Commit.** Publish the new canvas size, DPR, and attachments together.
-3. **Notify.** Run internal attachment-replacement listeners, then `onResize` callbacks. Every callback already sees the new `surface.size`, `dpr`, and `surface.depth`.
+3. **Notify.** Run internal attachment-replacement listeners, then public `onResize` callbacks for explicit or automatic resizes. Every callback already sees the new `surface.size`, `dpr`, and `surface.depth`.
 4. **Release.** Destroy the previous owned attachments.
 
 A throwing callback does not stop the remaining callbacks or the release step; the first error is rethrown after both, and the new generation stays committed. The reentrancy guard covers steps 2–4, including an `onResize` subscription made inside a replacement callback: resizing the same surface there throws `VGPU-SURFACE-RESIZE-REENTRANT`, and `frame(gpu)` throws `VGPU-FRAME-REENTRANT`. A same-size resize allocates nothing and notifies nobody.
