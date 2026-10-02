@@ -65,9 +65,11 @@ interface Surface extends Target {
 
 **Returns:** `surface(gpu)` returns `Surface`; `onResize()` returns an unsubscribe function; `dispose()` returns `void`.
 
-**Throws:** `VGPU-SURFACE-CONTEXT` when `getContext("webgpu")` returns `null`; `VGPU-SURFACE-DUPLICATE` when a live surface already owns the canvas; `VGPU-SURFACE-AUTORESIZE-UNSUPPORTED` for explicit `autoResize: true` on buffer-only canvases; `VGPU-SURFACE-DISPOSED` when using a disposed surface; `VGPU-SURFACE-RESIZE-REENTRANT` when resizing the same surface from its own resize callback; `VGPU-FRAME-REENTRANT` when `frame(gpu)` is called from any `onResize` callback. The immediate `onResize` fire on subscription also counts as being inside an `onResize` callback, so call `frame(gpu)` before subscribing or from code outside the callback.
+**Throws:** `VGPU-SURFACE-CONTEXT` when `getContext("webgpu")` returns `null`; `VGPU-SURFACE-DUPLICATE` when a live surface already owns the canvas; `VGPU-SURFACE-AUTORESIZE-UNSUPPORTED` for explicit `autoResize: true` on buffer-only canvases; `VGPU-SURFACE-DISPOSED` when using a disposed surface, including as a `compile()`, `compileSync()`, `targets: [...]`, or `bundle()` preparation target; `VGPU-SURFACE-NOT-IN-FRAME` when a one-shot `draw.draw(surface)` / `effect.draw(surface)` runs while no frame is active, or a frame that already submitted opens a surface pass — encode surface draws inside `frame(gpu, ...)`, while `compile(surface)` and `bundle(gpu, { target: surface }, ...)` can prepare outside a frame; `VGPU-SURFACE-RESIZE-REENTRANT` when resizing the same surface from its own resize callback; `VGPU-FRAME-REENTRANT` when `frame(gpu)` is called from any `onResize` callback. The immediate `onResize` fire on subscription also counts as being inside an `onResize` callback, so call `frame(gpu)` before subscribing or from code outside the callback.
 
 A surface is never a valid input binding. Passing one as a binding value to `draw(gpu)`, `effect(gpu)`, or `compute(gpu)` — in the constructor `set` option or a later `.set()`, inside or outside a frame — throws `VGPU-SURFACE-NOT-BINDABLE` from that call. The error names the binding and drawable in `where` (for example `post.source`). vgpu rejects the surface before it reads `color`, `colors`, or `depth`, so no canvas texture is acquired; that holds for disposed surfaces too. Fix: “Render to an offscreen target and bind that target or its texture. Use Surface only as a render destination.”
+
+A live surface is a valid preparation target outside a frame. `draw.compile(surface)`, `effect.compile(surface)`, `compileSync(surface)`, `draw(gpu, { targets: [surface] })`, and `bundle(gpu, { target: surface }, ...)` read the surface's configured render signature — `format`, no depth attachment, sample count 1. They do not acquire the current canvas texture, read or allocate attachments, resize the canvas, notify `onResize` listeners, or submit work. Rendering to the surface — pass draws and bundle replay — stays inside `frame(gpu)` or `frameLoop(gpu)`.
 
 ## Examples
 
@@ -178,19 +180,26 @@ canvasSurface.onResize(({ width, height }) => {
 canvasSurface.resize([640, 360]);
 ```
 
+Prepare pipelines and bundles for the surface during loading, then render inside the frame loop:
+
 ```ts
-import { init, bundle, effect, frame, surface } from "vgpu/mock";
+import { init, bundle, effect, frameLoop, surface } from "vgpu";
 
 declare const canvas: HTMLCanvasElement;
 
 const gpu = await init();
 const canvasSurface = surface(gpu, canvas);
-const draw = effect(gpu, `@fragment fn fs_main() -> @location(0) vec4f { return vec4f(1); }`);
-let statics = bundle(gpu, { target: canvasSurface }, (recorded) => recorded.draw(draw));
+const background = effect(gpu, `@fragment fn fs_main() -> @location(0) vec4f { return vec4f(0.1, 0.2, 0.4, 1); }`);
 
-// Drawing onto a resized surface keeps the same bundle valid as long as the render signature matches.
-frame(gpu, (currentFrame) => currentFrame.pass({ target: canvasSurface }, (pass) => pass.bundles(statics)));
+await background.compile(canvasSurface); // outside a frame: reads canvasSurface.format, acquires no canvas texture
+const statics = bundle(gpu, { target: canvasSurface }, (recorded) => recorded.draw(background)); // also outside a frame
+
+frameLoop(gpu, (currentFrame) => {
+  currentFrame.pass({ target: canvasSurface }, (pass) => pass.bundles(statics)); // replay stays inside the frame
+});
 ```
+
+Resizing the surface changes only its size, so the compiled pipeline and the recorded bundle keep matching its render signature. Normal bundle staleness still applies: a bundle that samples a resized `Target` must be re-recorded.
 
 ## Notes
 
@@ -198,6 +207,7 @@ frame(gpu, (currentFrame) => currentFrame.pass({ target: canvasSurface }, (pass)
 - A surface pass may be the final presentation pass; do not use a surface as a ping-pong resource. For post-processing, render into a `Target`, then sample it in a draw or effect targeting the surface in the same frame.
 - Do not bind a surface: `set({ source: canvasSurface })` throws `VGPU-SURFACE-NOT-BINDABLE` in every resource slot (sampled color or depth, storage texture, sampler, buffer). Bind an offscreen `Target` to follow its attachment across resizes, or bind an explicit `Texture` such as `sceneTarget.color` to keep that exact texture until you rebind it.
 - `surface.color` is still a `Texture`, but it wraps the canvas's current texture, which the browser replaces after each presentation. Binding it explicitly is not a substitute for an offscreen target: the binding does not follow later frames and is not safe to reuse after the frame presents.
+- Prepare against the surface itself once it exists; keep a signature such as `{ colors: [navigator.gpu.getPreferredCanvasFormat()] }` for preparation before `surface(gpu, canvas)` runs. Do not hardcode `bgra8unorm` or `rgba8unorm` for a canvas.
 - Layout-backed detection is structural: `typeof canvas.clientWidth === "number"`; it does not use `instanceof`.
 - Resize callbacks run in surface creation order at the frame boundary, before the user frame callback.
 - Manual `surface.resize()` fires callbacks synchronously at the call site and works for `OffscreenCanvas`.
