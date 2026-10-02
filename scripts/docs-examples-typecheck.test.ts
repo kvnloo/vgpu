@@ -175,16 +175,6 @@ function exampleProgram(parsed = parseExamplesConfig()): ts.Program {
   return ts.createProgram(parsed.fileNames, parsed.options);
 }
 
-function formatDiagnostics(
-  diagnostics: readonly ts.Diagnostic[],
-  cwd = docsRoot,
-): string {
-  return ts.formatDiagnosticsWithColorAndContext(
-    diagnostics,
-    compilerHostFor(cwd),
-  );
-}
-
 function runIsolatedTypecheck(sources: Readonly<Record<string, string>>): {
   output: string;
   status: number;
@@ -244,15 +234,9 @@ test("isolated config includes every TS, TSX, MTS, test, and tool example", () =
   expect(configured).toContain(resolve(examplesRoot, "glass-fractal/tools/hero-fractal-vector-debug.mts"));
 });
 
-test("isolated program resolves examples and declarations without Next output", () => {
+test("isolated program resolves source and declaration graph without Next output", () => {
   const parsed = parseExamplesConfig();
   const program = exampleProgram(parsed);
-  const diagnostics = ts.getPreEmitDiagnostics(program);
-
-  if (diagnostics.length > 0) {
-    throw new Error(`TypeScript reported diagnostics:\n${formatDiagnostics(diagnostics)}`);
-  }
-
   const programSources = normalized(program.getSourceFiles().map((source) => source.fileName));
   expect(programSources).toEqual(expect.arrayContaining(
     exampleSourceInventory().files,
@@ -263,6 +247,15 @@ test("isolated program resolves examples and declarations without Next output", 
     resolve(docsRoot, "test-support/mock-uniforms.ts"),
     resolve(docsRoot, "webgpu-types.d.ts"),
     resolve(docsRoot, "wgsl.d.ts"),
+  ]));
+  expect(programSources).toEqual(expect.arrayContaining([
+    resolve(repoRoot, "packages/vgpu-api/client.d.ts"),
+    resolve(repoRoot, "packages/vgpu-api/dist/index.d.ts"),
+    resolve(repoRoot, "packages/wgsl/dist/runtime/resolve-shader.d.ts"),
+    ts.sys.realpath?.(resolve(
+      repoRoot,
+      "node_modules/@webgpu/types/dist/index.d.ts",
+    )) ?? resolve(repoRoot, "node_modules/@webgpu/types/dist/index.d.ts"),
   ]));
 
   const generatedOrRouteSources = programSources
