@@ -3,6 +3,7 @@ import { expect, test, vi } from "vitest";
 import { bundle, draw, effect, frame, geometry, init, surface, target } from "../src/mock.ts";
 import { instanceGeometry } from "../src/scene/instance-geometry.ts";
 import { instances } from "../src/scene/instances.ts";
+import type { CanvasSurface } from "../src/surface.ts";
 
 const FULLSCREEN = `
 @vertex fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
@@ -127,7 +128,7 @@ test("resize runs every listener and old-generation cleanup before propagating a
       depth: true,
       format: "rgba8unorm",
       size: [8, 6],
-    });
+    }) as CanvasSurface;
     const oldDepth = screen.depth!;
     const order: string[] = [];
     let resizing = false;
@@ -168,7 +169,7 @@ test("an immediate onResize subscription cannot clear an outer texture-recreated
       depth: true,
       format: "rgba8unorm",
       size: [8, 6],
-    });
+    }) as CanvasSurface;
     const oldDepth = screen.depth!;
     let replacementCallbacks = 0;
     const immediate: Array<readonly [number, number]> = [];

@@ -213,7 +213,7 @@ function gpuCanvasLike(width: number, height: number): OffscreenCanvas {
           }
           return current;
         },
-      } satisfies GPUCanvasContext;
+      } as unknown as GPUCanvasContext;
     },
   };
   return canvas as unknown as OffscreenCanvas;
