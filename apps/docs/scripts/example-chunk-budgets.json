@@ -13,12 +13,12 @@
   "examples": {
     "gradient": 54911,
     "holographic-card": 75367,
-    "triangle-led-front": 89122,
+    "triangle-led-front": 94368,
     "anti-aliasing": 69642,
     "black-hole": 60551,
     "optimized-black-hole": 15499,
     "earth": 89878,
-    "fluid": 62570,
+    "fluid": 68034,
     "instanced-rendering": 81047,
     "batch-rendering": 72822,
     "fft-ocean": 63377,
@@ -33,9 +33,9 @@
     "radiance-cascades": 73313,
     "agent-radiance-cascades": 72305,
     "nextjs-flare": 80616,
-    "depth-estimation": 71219,
+    "depth-estimation": 76840,
     "mnist-classifier": 69136,
-    "air-painting": 77674,
+    "air-painting": 83271,
     "tsl-exports": 239570,
     "three-tsl": 279113,
     "particle-orbit": 160967,
@@ -84,5 +84,6 @@
   "$comment:spring-choreography-shared-chunks": "Adding Spring Choreography does not move any non-Motion route: Glass Sculpture matches canary CI run 36044722520 exactly (73289 B), Spiral Galaxy still measures 87311 B, and Atmosphere still reads the same 111816 B here (111628 B in that CI run).",
   "$comment:scene-gallery": "Measured together from the final three-example production build on Node 22.21.1 / Next 16.3.3: Kinetic Sculpture 98611 B, Modular City 108272 B, Marble Machine 133147 B gzip. These include the shared runtime chunks; Marble Machine also includes the docs-only cannon-es physics dependency. The checker passed isolation and existing route limits before these three measured entries were added. All 35 existing example baselines, the shared-host budget, growth allowances and historical provenance are unchanged.",
   "$comment:mechanical-garden": "Measured at 142492 B gzip from the robot-training-ground production build on Node 22.21.1 / Next 16.3.3. The route-owned chunk is 53023 B, including the quadruped geometry, exclusive DOM toolbar, seven WGSL modules and selected math utilities; the remaining 89469 B are shared runtime chunks, including vgpu/scene and lil-gui. All 38 other routes pass their unchanged budgets; the shared-host budget, growth allowances and isolation checks are unchanged. math remains a private docs-app dependency.",
-  "$comment:device-loss": "Only holographic-card was remeasured by the official checker after gpu.lost: a fresh Node 22.21.1 / Next 16.3.3 production build measured 75367 B gzip, identical to Linux CI, versus 75070 B on exact-base canary 8c048592. Its previous baseline was 69978 B, leaving only 28 B before this feature. The 297 B shared-runtime growth is intentional; the remaining 38 routes pass their existing limits. Shared-host baseline, growth allowances, chunk isolation/freshness rules and historical provenance are unchanged."
+  "$comment:device-loss": "Only holographic-card was remeasured by the official checker after gpu.lost: a fresh Node 22.21.1 / Next 16.3.3 production build measured 75367 B gzip, identical to Linux CI, versus 75070 B on exact-base canary 8c048592. Its previous baseline was 69978 B, leaving only 28 B before this feature. The 297 B shared-runtime growth is intentional; the remaining 38 routes pass their existing limits. Shared-host baseline, growth allowances, chunk isolation/freshness rules and historical provenance are unchanged.",
+  "$comment:surface-depth-msaa": "Only triangle-led-front, fluid, depth-estimation and air-painting were remeasured by the official checker from a fresh Node 22.21.1 / Next 16.3.3 production build after opt-in Surface depth/MSAA. Against exact-base canary 86d1f01b CI, their shared-runtime growth is 697, 715, 647 and 647 gzip bytes respectively; all four crossed their remaining allowance. The other 35 route baselines (including holographic-card), shared-host baseline, growth allowances, isolation/freshness rules and historical provenance are unchanged."
 }
