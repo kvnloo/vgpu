@@ -51,7 +51,7 @@ interface Surface extends Target {
 | Param | Type | Required | Default | Notes |
 |---|---|---:|---|---|
 | surface.canvas | `HTMLCanvasElement \| OffscreenCanvas` | ✔ | — | Must return a `GPUCanvasContext` from `getContext("webgpu")`. |
-| surface.opts | `SurfaceOptions` | ✖ | `{}` | Canvas configuration, attachments, and resize behavior. Read once at construction: mutating the options object later changes nothing. |
+| surface.opts | `SurfaceOptions` | ✖ | `{}` | Canvas configuration, attachments, and resize behavior. Canvas configuration and depth/MSAA options are fixed at construction; see individual fields for resize behavior. |
 | opts.autoResize | `boolean` | ✖ | `true` for layout-backed canvases, `false` when `size` is provided or when the canvas has no numeric `clientWidth` | Auto-resize is checked at the frame boundary before user frame callbacks. Explicit `true` on buffer-only canvases throws. |
 | opts.dpr | `number \| readonly [number, number]` | ✖ | `globalThis.devicePixelRatio ?? 1` | Number fixes DPR. Tuple clamps runtime DPR to `[min, max]`; layout-backed surfaces re-read DPR each frame. |
 | opts.size | `readonly [number, number]` | ✖ | Layout-backed: `clientWidth/clientHeight × dpr`; buffer-only: existing `canvas.width/height` | Physical pixel size. When provided, initial canvas buffer is set and `autoResize` defaults to `false`. |
@@ -237,7 +237,7 @@ const haze = draw(gpu, {
       return vec4f(0.7, 0.8, 0.9, 1.0) * depth * 0.3;
     }
   `,
-  depth: false, // required: the pass depth is read-only
+  depth: { write: false }, // depth-test without writing the read-only depth
   blend: "additive",
 });
 
@@ -249,7 +249,7 @@ frame(gpu, (currentFrame) => {
 });
 ```
 
-`surface.depth` is a plain `Texture` with `render_attachment` and `texture_binding` usage, so the binding keeps that exact texture. The `onResize` rebind is what keeps it current: a draw that still holds a destroyed depth throws `VGPU-R1-BINDING-DESTROYED`. An `msaa` surface's depth has 4 samples and is discarded after each pass, so it cannot be read this way.
+`surface.depth` is a plain `Texture` with `render_attachment` and `texture_binding` usage, so the binding keeps that exact texture. The `onResize` rebind keeps it current for explicit and automatic resizes; direct canvas writes need an explicit rebind after reconciliation (see [Resize transaction](#resize-transaction)). A draw that still holds a destroyed depth throws `VGPU-R1-BINDING-DESTROYED`. An `msaa` surface's depth has 4 samples and is discarded after each pass, so it cannot be read this way.
 
 ### Derived targets, multiple canvases, and `OffscreenCanvas`
 
@@ -355,9 +355,13 @@ The signature here is `{ colors: [canvasSurface.format], depth: "depth24plus", s
 3. **Notify.** Run internal attachment-replacement listeners, then public `onResize` callbacks for explicit or automatic resizes. Every callback already sees the new `surface.size`, `dpr`, and `surface.depth`.
 4. **Release.** Destroy the previous owned attachments.
 
-A throwing callback does not stop the remaining callbacks or the release step; the first error is rethrown after both, and the new generation stays committed. The reentrancy guard covers steps 2–4, including an `onResize` subscription made inside a replacement callback: resizing the same surface there throws `VGPU-SURFACE-RESIZE-REENTRANT`, and `frame(gpu)` throws `VGPU-FRAME-REENTRANT`. A same-size resize allocates nothing and notifies nobody.
+A throwing callback does not stop the remaining callbacks or the release step; the first error is rethrown after both, and the new generation stays committed. The reentrancy guard covers steps 2–4, including an `onResize` subscription made inside a replacement callback: resizing the same surface there throws `VGPU-SURFACE-RESIZE-REENTRANT`, and `frame(gpu)` throws `VGPU-FRAME-REENTRANT`.
 
-The transaction covers the attachments vgpu manages, not everything around them. If you write `canvas.width` / `canvas.height` directly, the next surface pass reconciles its attachments before acquiring the canvas texture. Direct writes do not notify public `onResize` listeners; internal texture-replacement notifications still invalidate references to old attachments. When allocation fails, the pass throws first, `surface.size` reports the size you wrote while the old attachments stay live, and the next pass retries. vgpu does not roll back your canvas write. Prefer `surface.resize(...)` outside the frame callback so replacement, depth rebinding, and public notifications happen before you encode anything. Late native validation or out-of-memory errors arrive through normal WebGPU error reporting without rollback; this is not an async resize API.
+A resize matching both the canvas buffer and the attachment generation allocates nothing and notifies nobody. After a direct canvas write, `surface.resize(surface.size)` replaces stale owned attachments and notifies listeners so they can rebind; a default surface with no owned attachments keeps its existing no-op behavior. A library change to the canvas buffer size notifies in either case.
+
+If you write `canvas.width` / `canvas.height` directly between frames, vgpu reconciles attachments at the next frame boundary, before your callback encodes any passes, including for `OffscreenCanvas` and `autoResize: false`. Reconciliation itself does not notify public `onResize` listeners; internal texture-replacement notifications still invalidate references to old attachments. Automatic layout resizing retains its usual notifications. Rebind a captured depth texture to the current `surface.depth` before using it. Prefer `surface.resize(...)` before the frame so replacement, rebinding, and public notifications happen together.
+
+The pass descriptor also reconciles dimensions changed during a frame, before acquiring the canvas texture. This does not preserve commands that already reference old attachments: resize before encoding them, and submit any older manual frames first. If replacement allocation throws, the frame boundary or pass throws before user encoding or texture acquisition respectively; `surface.size` reports your written size, the old attachments stay live, and the next attempt retries. vgpu does not roll back your canvas write. Late native validation or out-of-memory errors arrive through normal WebGPU error reporting without rollback; this is not an async resize API.
 
 ## Notes
 
