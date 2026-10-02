@@ -55,7 +55,7 @@ frameLoop(gpu, (frame) => {
 
 Record what doesn't change, `set()` what does: the bundle references your buffers, so uniform updates flow through on every replay.
 
-Recording against a live surface works outside a frame, during loading. vgpu reads the surface's configured render signature — its `format`, including an explicit `surface(..., { format })` override, with no depth attachment and a sample count of 1 — and does not acquire a canvas texture, resize the canvas, or submit work. Replay is the part that draws, so it stays inside `frame()` or `frameLoop()`. Recording against a disposed surface throws `VGPU-SURFACE-DISPOSED`.
+Recording against a live surface works outside a frame, during loading. vgpu reads the surface's configured render signature — its `format`, including an explicit override, resolved depth format, and sample count — and does not acquire a canvas texture, resize the canvas, or submit work. Replay is the part that draws, so it stays inside `frame()` or `frameLoop()`. Recording against a disposed surface throws `VGPU-SURFACE-DISPOSED`.
 
 > Good to know: draws inside a bundle can use different shaders and pipelines. What a bundle freezes is the target's render signature — color formats, depth format, sample count — plus bind groups, not a material or a target size.
 
@@ -100,7 +100,7 @@ frameLoop(gpu, (frame) => {
 });
 ```
 
-Bindings must be `set()` before recording — the signature relaxes the target requirement, not the resources. Replay targets must match the recorded color formats, depth format, and sample count exactly; a mismatch throws an error showing both signatures. Query the preferred format for a future default canvas surface, and use the configured formats for custom or offscreen targets. Once the surface or target exists, pass it directly instead of a signature: `await ocean.compile(canvasTarget)` followed by `bundle(gpu, { target: canvasTarget }, ...)` pre-warms and records outside any frame, and shares the same cached pipelines as the equivalent signature.
+Bindings must be `set()` before recording — the signature relaxes the target requirement, not the resources. Replay targets must match the recorded color formats, depth format, and sample count exactly; a mismatch throws an error showing both signatures. The preferred-format signature above describes a default surface with no depth and one sample. Include the planned depth format and sample count for depth/MSAA surfaces, and use the configured formats for custom or offscreen targets. Once the surface or target exists, pass it directly instead of a signature: `await ocean.compile(canvasTarget)` followed by `bundle(gpu, { target: canvasTarget }, ...)` pre-warms and records outside any frame, and shares the same cached pipelines as the equivalent signature.
 
 ## Mix recorded and dynamic draws
 

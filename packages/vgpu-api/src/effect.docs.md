@@ -118,7 +118,7 @@ gpu.dispose();
 
 Effects compile lazily for the target signature they draw into. Use `await effect.compile(target)` during loading to pre-warm without blocking, or `effect.compileSync(target)` when synchronous creation is acceptable. Signature objects follow the same shape as draws: `colors` is required, `depth` and `sampleCount` are optional.
 
-A live `Surface` is a valid preparation target outside a frame. `compile()` reads its configured signature — `format`, no depth attachment, sample count 1 — without acquiring the canvas texture, resizing the canvas, or submitting work:
+A live `Surface` is a valid preparation target outside a frame. `compile()` reads its configured signature — `format`, resolved depth format, and sample count — without acquiring the canvas texture, resizing the canvas, or submitting work:
 
 ```ts
 import { init, effect, frameLoop, surface } from "vgpu";
@@ -135,7 +135,7 @@ await gradient.compile(canvasSurface); // during loading, outside any frame
 frameLoop(gpu, (currentFrame) => currentFrame.pass(canvasSurface, gradient)); // drawing stays in the frame
 ```
 
-Before the surface exists, compile against `{ colors: [navigator.gpu.getPreferredCanvasFormat()] }` instead; a surface created later with the default format shares that cached pipeline.
+Before the surface exists, compile against `{ colors: [navigator.gpu.getPreferredCanvasFormat()] }` for a surface with the default format, no depth, and one sample. A surface created later with those defaults shares that cached pipeline. Include the planned `depth` format and `sampleCount` for a surface using those options, or prefer `compile(surface)` once it exists.
 
 ## Notes
 
