@@ -535,6 +535,26 @@ export function surfaceNotInFrameError(where: string): VGPUError {
   });
 }
 
+export function surfaceDepthInvalidError(received: unknown): VGPUError {
+  return new VGPUError({
+    code: "VGPU-SURFACE-DEPTH-INVALID",
+    message: "Surface depth must be false, true, or a depth-aspect texture format.",
+    fix: 'Use depth: true, a depth-aspect format such as "depth24plus", or omit depth.',
+    where: "surface",
+    detail: { actual: typeof received === "string" || typeof received === "number" ? received : undefined, type: typeof received },
+  });
+}
+
+export function surfaceMsaaInvalidError(received: unknown): VGPUError {
+  return new VGPUError({
+    code: "VGPU-SURFACE-MSAA-INVALID",
+    message: "Surface msaa must be false, true, or 4.",
+    fix: "Use msaa: false for one sample, msaa: true or msaa: 4 for four samples, or omit msaa.",
+    where: "surface",
+    detail: { actual: typeof received === "string" || typeof received === "number" ? received : undefined, type: typeof received },
+  });
+}
+
 export function surfaceContextError(): VGPUError {
   return new VGPUError({
     code: "VGPU-SURFACE-CONTEXT",

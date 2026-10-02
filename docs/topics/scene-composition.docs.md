@@ -758,6 +758,8 @@ The executable `examples/by-example-s06-scene/src/composition.ts` and its native
 
 Both complete examples below render the same scene with the same shader: a three-part arm (base → arm → claw) plus a population of crates, all drawn with one instanced draw call, with an orbit camera that follows the claw. They differ only in where the arm's world matrices come from.
 
+This setup renders the scene into an offscreen depth target and composites it to the canvas, which is where a post-processing pass belongs. If you only present the scene, render it straight to a depth surface instead — see [Render straight to the canvas](#render-straight-to-the-canvas).
+
 Shared setup — targets, the collection, the bridge, the draw, and camera state — is created once:
 
 ```ts
@@ -778,7 +780,7 @@ const presentShader = `
 export const gpu = await init();
 const canvas = document.querySelector("canvas")!;
 const canvasSurface = surface(gpu, canvas);
-const sceneTarget = target(gpu, { size: canvasSurface.size, depth: true }); // surfaces have no depth
+const sceneTarget = target(gpu, { size: canvasSurface.size, depth: true }); // offscreen, so the present pass can sample it
 canvasSurface.onResize(({ width, height }) => sceneTarget.resize([width, height]));
 const present = effect(gpu, presentShader, { set: { scene: sceneTarget, sceneSampler: sampler(gpu, { minFilter: "linear", magFilter: "linear" }) } });
 
@@ -946,6 +948,46 @@ currentFrame.pass({ target: sceneTarget, clear: false }, (pass) => pass.draw(box
 
 `depthDraw` uses `geometry: bridge.geometry` too, so its shader declares `world0..world3`, `size`, and `tint` even though it ignores `tint`.
 
+### Render straight to the canvas
+
+When nothing samples the rendered scene, the offscreen target and present pass are optional. Create the surface with `depth` — and `msaa` for antialiased edges — and draw the bridge into it directly:
+
+```ts
+import { draw, frameLoop, geometry, init, surface } from "vgpu";
+import { box, instances, orbitRig, perspective, rigPose, viewMatrices } from "vgpu/scene";
+import { instanceGeometry } from "vgpu/scene/gpu";
+import boxShader from "./boxes.wgsl";
+
+const gpu = await init();
+const canvas = document.querySelector("canvas")!;
+
+// ---cut---
+const canvasSurface = surface(gpu, canvas, { depth: true, msaa: true }); // owned depth24plus + 4× MSAA
+
+const crates = instances({ capacity: 1, attributes: { size: "float32x3", tint: "float32x4" } });
+crates.add({ size: [1, 1, 1], tint: [0.9, 0.5, 0.1, 1] });
+const crateBridge = instanceGeometry(gpu, crates, { mesh: geometry(gpu, box()) }); // you still own the mesh
+const crateDraw = draw(gpu, { shader: boxShader, geometry: crateBridge.geometry, cull: "back" });
+crateDraw.set({ lighting: { direction: [-0.4, -1, -0.3], ambient: 0.15 } });
+
+const rig = orbitRig({ yaw: 0.6, pitch: 0.4, distance: 4 });
+const projection = new Float32Array(16);
+const pose = { position: new Float32Array(3), quaternion: new Float32Array(4) };
+const matrices = { view: new Float32Array(16), viewProjection: new Float32Array(16) };
+
+frameLoop(gpu, (currentFrame) => {
+  perspective({ fov: 45, near: 0.1, far: 100 }, canvasSurface.size[0] / canvasSurface.size[1], projection);
+  viewMatrices(rigPose(rig, pose), projection, matrices);
+  crateDraw.set({ camera: { viewProjection: matrices.viewProjection } }); // set() packs now
+  const crateCount = crateBridge.publish(); // before the pass that reads it
+  currentFrame.pass({ target: canvasSurface, clear: [0.05, 0.05, 0.07, 1] }, (pass) => {
+    pass.draw(crateDraw, { instances: crateCount });
+  });
+});
+```
+
+Only the target changed: the camera, the named `set()` calls, `publish()` before encoding, and the explicit `instances` count are the same as in `renderFrame`. To switch the shared setup over, drop `sceneTarget` and `present`, compute the aspect from `canvasSurface.size`, and encode the single surface pass in step 5. With `msaa`, every surface pass clears, so the depth prepass above needs the offscreen target or a surface without `msaa`. See [`Surface`](/reference/vgpu/surface#surface) for attachment lifetimes and resize.
+
 ## Errors and how to fix them
 
 The validation errors listed below are `VGPUError`s with a `code`, a message naming the offending field path, handle, attribute, or count, and a `fix`. Passing an object that was not created by `instances()` as a GPU bridge collection throws a `TypeError`; pass the original collection instead. Validation runs before any mutation unless the row says otherwise.
@@ -1095,4 +1137,4 @@ Behavior differences to check while migrating:
 - No automatic capacity growth, keep-world reparenting, matrix decomposition, or partial hierarchy traversal.
 - No large-coordinate precision beyond float32.
 
-See [Draws](/concepts/draws) for the `draw(gpu)` and `geometry(gpu)` basics this guide builds on, and [Two-pass rendering](/guides/two-pass-rendering) for the depth target and present pass used in the complete example.
+See [Draws](/concepts/draws) for the `draw(gpu)` and `geometry(gpu)` basics this guide builds on, and [Two-pass rendering](/guides/two-pass-rendering) for the depth target and present pass used in the complete example, or a depth [`Surface`](/reference/vgpu/surface#surface) for single-pass rendering.

@@ -75,7 +75,7 @@ The shader chooses the camera's group and binding. `cube.set({ camera: { viewPro
 
 Three details specific to geometry:
 
-- 3D needs a depth buffer, and surfaces don't have one — render into a `target(gpu, { depth: true })` and composite it to the canvas. [Effects](/concepts/effects) and [Passes](/concepts/passes) show how. Deep scenes fight z-fighting with reversed-Z: `depth: { compare: "greater" }` on the draw, `clearDepth: 0` on the pass.
+- For depth-tested 3D presented directly to the canvas, use `surface(gpu, canvas, { depth: true, msaa: true })`. Use an offscreen `target(gpu, { depth: true })` when another pass needs to sample the scene image; [Two-pass rendering](/guides/two-pass-rendering) shows both paths. Deep scenes fight z-fighting with reversed-Z: `depth: { compare: "greater" }` on the draw, `clearDepth: 0` on the pass.
 - A closed geometry like this box never shows its back faces — add `cull: "back"` to the draw and skip roughly half the fragment work.
 - `GeometryLike` is an open interface: `geometry(gpu)` builds one from `vgpu/scene` geometry, but you can also pass your own `GPUBuffer`s and vertex layouts. See the [reference](/reference/vgpu/draw#geometrylike).
 

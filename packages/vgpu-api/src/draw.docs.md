@@ -451,7 +451,7 @@ The compute pass writes the draw arguments and the draw consumes them on the GPU
 
 `draw.compile(target)` asynchronously prepares one target signature and resolves to the same draw. `draw.compileSync(target)` prepares the same signature synchronously; if an async compile for that signature is still pending, the synchronous result wins the race and unblocks later draws. Both methods also accept a target signature object such as `{ colors: ["bgra8unorm"], depth: "depth24plus", sampleCount: 4 }`; `colors` is required and bare strings are rejected.
 
-Pass a live `Surface` to prepare for a canvas during loading. Preparation reads the surface's configured signature — `format`, no depth attachment, sample count 1 — and does not acquire the canvas texture, resize the canvas, or submit work, so it runs outside any frame:
+Pass a live `Surface` to prepare for a canvas during loading. Preparation reads the surface's configured signature — `format`, resolved depth format, and sample count — and does not acquire the canvas texture, resize the canvas, or submit work, so it runs outside any frame:
 
 ```ts
 import { init, draw, frameLoop, surface } from "vgpu";
@@ -476,7 +476,7 @@ frameLoop(gpu, (currentFrame) => {
 });
 ```
 
-A surface and the equivalent signature `{ colors: [canvasSurface.format] }` share one cached pipeline, and a size-only resize keeps it valid. Keep the signature form for preparation before the surface exists.
+The default surface shown above and the equivalent signature `{ colors: [canvasSurface.format] }` share one cached pipeline, and a size-only resize keeps it valid. A surface with `depth` or `msaa` needs the matching `depth` and `sampleCount` in that signature. Prefer `compile(surface)` once the surface exists; use the explicit signature for preparation before it does.
 
 Each color/depth/sample-count variant is a different pipeline. A missed variant sync-compiles on first use, which can jank; fire-and-forget pre-warms should always use `.catch(...)` or `gpu.onError`/`gpu.settled()` will not observe the returned promise rejection. `targets: [target]` is kept as creation-time `compileSync()` sugar for non-browser hot paths.
 
