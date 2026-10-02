@@ -198,7 +198,7 @@ export async function teardown(): Promise<void> {
 }
 ```
 
-Synchronous block bodies, `void` expressions such as `(currentFrame) => currentFrame.pass(canvasTarget, shade)`, and helpers with a known non-Promise return type work — vgpu ignores the returned value. Existing synchronous helpers with those types need no rewrite.
+Synchronous block bodies, `void` expressions such as `(currentFrame) => currentFrame.pass(canvasTarget, shade)`, and helpers with a concrete non-Promise return type work — vgpu ignores the returned value. Existing synchronous helpers with those types need no rewrite.
 
 TypeScript rejects a callback whose inferred return type is a `Promise`, a `PromiseLike`, or a union containing one:
 
@@ -209,7 +209,9 @@ frame(gpu, async (currentFrame) => { // type error: the callback returns Promise
 });
 ```
 
-The type check cannot see a return type that was already erased — a callback stored as `FrameLoopCallback`, `(frame: Frame) => unknown`, or `(frame: Frame) => any`, a cast, a generic wrapper, or plain JavaScript. For those, vgpu checks the result at runtime: an object or function with a callable `then` throws `VGPU-ASYNC-FRAME-CALLBACK` before the implicit submit, and the frame is canceled exactly as if the callback had thrown. vgpu observes the promise's rejection without reporting it to `gpu.onError` and never waits for it, so the error is synchronous even for a promise that never settles. In a loop, the offending tick throws with `where: "frameLoop"` and stops the loop like any throwing tick; registering the loop never runs the callback, so `frameLoop(gpu, cb)` itself does not throw.
+The type check cannot see a return type that was already erased — a callback stored as `FrameLoopCallback`, `(frame: Frame) => unknown`, or `(frame: Frame) => any`, a cast, a return-type-erasing wrapper, or plain JavaScript. For those, vgpu checks the result at runtime: an object or function with a callable `then` throws `VGPU-ASYNC-FRAME-CALLBACK` before the implicit submit, and the frame is canceled exactly as if the callback had thrown. vgpu observes the promise's rejection without reporting it to `gpu.onError` and never waits for it, so the error is synchronous even for a promise that never settles. In a loop, the offending tick throws with `where: "frameLoop"` and stops the loop like any throwing tick; registering the loop never runs the callback, so `frameLoop(gpu, cb)` itself does not throw.
+
+A forwarding helper whose callback still returns an unresolved generic `R`, including `R extends void`, no longer typechecks: the frame API cannot prove that return synchronous. If the helper intentionally ignores callback returns, accept `FrameLoopCallback` or `(frame: Frame) => void` and pass the callback directly to `frame` or `frameLoop`. The runtime thenable check still sees its actual result; do not wrap the call in a block that discards that result.
 
 Cancellation still covers only the frame's own command buffer. A `frame.submit()` the callback already called stays on the queue, one-shot draws and dispatches have already submitted on their own, and CPU-side changes stay applied. The async continuation also keeps running; anything it tries to encode on the canceled frame throws `VGPU-FRAME-CANCELED`.
 

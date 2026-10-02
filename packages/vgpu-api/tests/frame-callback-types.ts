@@ -97,6 +97,29 @@ function eraseReturn<R>(callback: (currentFrame: Frame) => R): (currentFrame: Fr
 }
 const erasedByWrapper = eraseReturn(asyncNamed);
 
+// A forwarding wrapper whose return stays as an unresolved generic cannot prove that its callback
+// is synchronous. Give intentionally void-returning frame wrappers an erased callback contract and
+// pass that callback through directly so the runtime still sees any actual thenable result.
+function forwardGeneric<R>(callback: (currentFrame: Frame) => R): void {
+  // @ts-expect-error an unresolved generic return is not statically known to be synchronous
+  frame(gpu, callback);
+  // @ts-expect-error an unresolved generic return is not statically known to be synchronous
+  frameLoop(gpu, callback);
+  // @ts-expect-error an unresolved generic return is not statically known to be synchronous
+  runner.frame(callback);
+  // @ts-expect-error an unresolved generic return is not statically known to be synchronous
+  runner.loop(callback);
+}
+function forwardErased(callback: FrameLoopCallback): void {
+  frame(gpu, callback);
+  frameLoop(gpu, callback);
+  runner.frame(callback);
+  runner.loop(callback);
+}
+
+void forwardGeneric;
+void forwardErased;
+
 frame(gpu, erasedVoid);
 frame(gpu, erasedUnknown);
 frame(gpu, erasedByWrapper);
