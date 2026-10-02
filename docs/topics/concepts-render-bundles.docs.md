@@ -41,10 +41,10 @@ const boat = effect(gpu, `
 `);
 
 // ---cut---
-const scene = bundle(gpu, { target: { colors: [canvasTarget.format] } }, (b) => {
+const scene = bundle(gpu, { target: canvasTarget }, (b) => {
   b.draw(ocean);
   b.draw(boat);
-}); // encoded once, right here
+}); // encoded once, right here — no frame needed
 
 const time = clock(gpu);
 frameLoop(gpu, (frame) => {
@@ -55,7 +55,7 @@ frameLoop(gpu, (frame) => {
 
 Record what doesn't change, `set()` what does: the bundle references your buffers, so uniform updates flow through on every replay.
 
-Use the surface's format in a signature to record outside a frame without acquiring a canvas texture. This also respects an explicit surface format override. Passing a surface object as the bundle target requires an active frame.
+Recording against a live surface works outside a frame, during loading. vgpu reads the surface's configured render signature — its `format`, including an explicit `surface(..., { format })` override, with no depth attachment and a sample count of 1 — and does not acquire a canvas texture, resize the canvas, or submit work. Replay is the part that draws, so it stays inside `frame()` or `frameLoop()`. Recording against a disposed surface throws `VGPU-SURFACE-DISPOSED`.
 
 > Good to know: draws inside a bundle can use different shaders and pipelines. What a bundle freezes is the target's render signature — color formats, depth format, sample count — plus bind groups, not a material or a target size.
 
@@ -100,7 +100,7 @@ frameLoop(gpu, (frame) => {
 });
 ```
 
-Bindings must be `set()` before recording — the signature relaxes the target requirement, not the resources. Replay targets must match the recorded color formats, depth format, and sample count exactly; a mismatch throws an error showing both signatures. Query the preferred format for a future default canvas surface, use `canvasTarget.format` for an existing surface, and use the configured formats for custom or offscreen targets.
+Bindings must be `set()` before recording — the signature relaxes the target requirement, not the resources. Replay targets must match the recorded color formats, depth format, and sample count exactly; a mismatch throws an error showing both signatures. Query the preferred format for a future default canvas surface, and use the configured formats for custom or offscreen targets. Once the surface or target exists, pass it directly instead of a signature: `await ocean.compile(canvasTarget)` followed by `bundle(gpu, { target: canvasTarget }, ...)` pre-warms and records outside any frame, and shares the same cached pipelines as the equivalent signature.
 
 ## Mix recorded and dynamic draws
 
@@ -125,7 +125,7 @@ const cursor = effect(gpu, `
     return vec4f(1.0, 1.0, 1.0, step(distance(uv, params.pos), 0.02));
   }
 `, { set: { params: { pos: [0.5, 0.5] } } });
-const scene = bundle(gpu, { target: { colors: [canvasTarget.format] } }, (b) => b.draw(ocean));
+const scene = bundle(gpu, { target: canvasTarget }, (b) => b.draw(ocean));
 
 // ---cut---
 frameLoop(gpu, (frame) => {
@@ -155,7 +155,7 @@ const ocean = effect(gpu, `
 `);
 
 // ---cut---
-const scene = bundle(gpu, { target: { colors: [canvasTarget.format] } }, (b) => b.draw(ocean));
+const scene = bundle(gpu, { target: canvasTarget }, (b) => b.draw(ocean));
 
 frameLoop(gpu, (frame) => {
   frame.pass(canvasTarget, (pass) => pass.bundles(scene)); // still valid after every resize
@@ -186,7 +186,7 @@ let post: Bundle | undefined;
 
 canvasTarget.onResize(({ width, height }) => {
   sceneTarget.resize([width, height]); // new textures: the bundle sampling the old ones is stale
-  const next = bundle(gpu, { target: { colors: [canvasTarget.format] } }, (b) => b.draw(postEffect));
+  const next = bundle(gpu, { target: canvasTarget }, (b) => b.draw(postEffect));
   const previous = post;
   post = next; // swap only after recording succeeded
   previous?.dispose(); // then release the replaced bundle
