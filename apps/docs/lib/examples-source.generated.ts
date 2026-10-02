@@ -2893,6 +2893,7 @@ export const exampleSources = {
     "description": "Glossy striped marbles roll down maple ramps and pile into a felt tray; cannon-es runs the physics and vgpu/scene instances draw every body.",
     "tags": [
       "3d",
+      "cannon",
       "physics",
       "simulation",
       "shadows",

@@ -4,7 +4,7 @@ export const meta = {
   guide: '/docs/guides/scene-composition',
   description:
     'Glossy striped marbles roll down maple ramps and pile into a felt tray; cannon-es runs the physics and vgpu/scene instances draw every body.',
-  tags: ['3d', 'physics', 'simulation', 'shadows', 'instancing'],
+  tags: ['3d', 'cannon', 'physics', 'simulation', 'shadows', 'instancing'],
   capabilities: [
     'webgpu',
     'instanced-rendering',
