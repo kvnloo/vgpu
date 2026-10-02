@@ -1,9 +1,9 @@
 import { createRenderBundle } from "./core/render-bundle.ts";
-import { assertDrawGeometryUsable, InternalDraw, drawUsesBlendConstant, drawUsesStencilReference, encodeDraw, registerDrawBundle, watchDrawResources, type BundleBackReference, type BundleStaleEvent, type Draw, type DrawCallOptions } from "./draw.ts";
+import { assertDrawGeometryUsable, InternalDraw, drawUsesBlendConstant, drawUsesStencilReference, encodeDraw, registerDrawBundle, unregisterDrawBundle, watchDrawResources, type BundleBackReference, type BundleStaleEvent, type Draw, type DrawCallOptions } from "./draw.ts";
 import { InternalEffect, effectDraw, type Effect } from "./effect.ts";
 import type { CompileTarget, Target, TargetSignature } from "./target.ts";
 import { normalizeSignature, signatureKeyOf, validateTargetSignature } from "./pipeline-store.ts";
-import { bundleBlendConstantError, bundleStencilReferenceError, surfaceNotInFrameError, VGPUError } from "./errors.ts";
+import { bundleBlendConstantError, bundleDisposedError, bundleStencilReferenceError, surfaceNotInFrameError, VGPUError } from "./errors.ts";
 import { isFrameActive, isSurface } from "./surface.ts";
 import { FRAME_BUNDLE, type FrameBundleProtocol } from "./frame-protocols.ts";
 import { liveKernel } from "./live-kernel.ts";
@@ -34,10 +34,17 @@ export interface BundleRecorder {
 export interface Bundle {
   readonly id: string;
   readonly gpu: GPURenderBundle;
+  dispose(): void;
 }
 
 let nextBundleId = 1;
 let recordingDepth = 0;
+
+// Stale/disposed/failed bundles detach synchronously. This only removes observer metadata after an
+// otherwise-valid facade is abandoned; rendering correctness never depends on finalizer timing.
+const bundleResourceFinalizer = new FinalizationRegistry<Set<() => void>>((subscriptions) => {
+  releaseResourceSubscriptions(subscriptions);
+});
 
 /** Records explicit WebGPU render bundles and keeps the R3 stale signature checked at replay time. */
 export function createBundle(device: { readonly gpu: GPUDevice }, opts: BundleOptions, record: (recorder: BundleRecorder) => void): Bundle {
@@ -50,19 +57,27 @@ export function createBundle(device: { readonly gpu: GPUDevice }, opts: BundleOp
 }
 
 class RecordedBundle implements Bundle, BundleBackReference {
-  gpu!: GPURenderBundle;
+  #gpu?: GPURenderBundle;
+  #disposed = false;
   #staleEvent?: BundleStaleEvent;
   readonly #signatureKey: string;
   readonly #draws = new Set<InternalDraw>();
-  readonly #resourceSubscriptions: (() => void)[] = [];
+  readonly #resourceSubscriptions = new Set<() => void>();
+  readonly #resourceFinalizerToken = {};
 
   constructor(private readonly device: { readonly gpu: GPUDevice }, readonly id: string, readonly signature: TargetSignature) {
     this.#signatureKey = signatureKeyOf(signature);
+    bundleResourceFinalizer.register(this, this.#resourceSubscriptions, this.#resourceFinalizerToken);
+  }
+
+  get gpu(): GPURenderBundle {
+    if (this.#disposed) throw bundleDisposedError(this.id);
+    return this.#gpu!;
   }
 
   record(record: (recorder: BundleRecorder) => void): void {
     try {
-      this.gpu = createRenderBundle(this.device, {
+      this.#gpu = createRenderBundle(this.device, {
         label: this.id,
         colorFormats: this.signature.colors,
         depthStencilFormat: this.signature.depth,
@@ -70,10 +85,10 @@ class RecordedBundle implements Bundle, BundleBackReference {
         record: (recorder) => this.#recordCommands(record, recorder.gpu as unknown as GPURenderPassEncoder),
       });
     } catch (error) {
-      this.#releaseResourceSubscriptions();
+      this.#detach();
       throw error;
     }
-    for (const draw of this.#draws) registerDrawBundle(draw, this);
+    if (!this.#staleEvent) for (const draw of this.#draws) registerDrawBundle(draw, this);
   }
 
   /**
@@ -82,15 +97,24 @@ class RecordedBundle implements Bundle, BundleBackReference {
    */
   get [FRAME_BUNDLE](): FrameBundleProtocol { return this; }
 
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#gpu = undefined;
+    this.#detach();
+  }
+
   markStale(event: BundleStaleEvent): void {
     // Set() while recording may deliberately encode different resources. Destruction of any
     // captured resource is never safe, including during recording or after the Draw was rebound.
     if (recordingDepth > 0 && !(event.kind === "binding-identity" && event.newIdentity.startsWith("destroyed:"))) return;
-    this.#staleEvent ??= event;
-    this.#releaseResourceSubscriptions();
+    if (this.#staleEvent) return;
+    this.#staleEvent = event;
+    this.#detach();
   }
 
   assertReplayable(target: Target): void {
+    if (this.#disposed) throw bundleDisposedError(this.id);
     const actual = normalizeBundleSignature(target);
     const actualKey = signatureKeyOf(actual);
     if (this.#signatureKey !== actualKey) throw bundleStaleError(this.id, targetSignatureStaleMessage(this.id, this.#signatureKey, actualKey));
@@ -99,12 +123,21 @@ class RecordedBundle implements Bundle, BundleBackReference {
   }
 
   remember(draw: InternalDraw): void {
+    if (this.#staleEvent || this.#disposed) return;
     this.#draws.add(draw);
-    if (!this.#staleEvent) this.#resourceSubscriptions.push(watchDrawResources(draw, event => this.markStale(event)));
+    const bundle = new WeakRef(this);
+    this.#resourceSubscriptions.add(watchDrawResources(draw, event => bundle.deref()?.markStale(event)));
   }
 
   #releaseResourceSubscriptions(): void {
-    for (const off of this.#resourceSubscriptions.splice(0)) off();
+    bundleResourceFinalizer.unregister(this.#resourceFinalizerToken);
+    releaseResourceSubscriptions(this.#resourceSubscriptions);
+  }
+
+  #detach(): void {
+    for (const draw of this.#draws) unregisterDrawBundle(draw, this);
+    this.#releaseResourceSubscriptions();
+    this.#draws.clear();
   }
 
   #recordCommands(record: (recorder: BundleRecorder) => void, encoder: GPURenderPassEncoder): void {
@@ -112,6 +145,11 @@ class RecordedBundle implements Bundle, BundleBackReference {
     try { record(new ExplicitBundleRecorder(this, encoder)); }
     finally { recordingDepth -= 1; }
   }
+}
+
+function releaseResourceSubscriptions(subscriptions: Set<() => void>): void {
+  for (const off of subscriptions) off();
+  subscriptions.clear();
 }
 
 class ExplicitBundleRecorder implements BundleRecorder {

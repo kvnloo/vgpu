@@ -118,6 +118,15 @@ export function blendConstantInvalidError(label: string, reason: string): VGPUEr
   });
 }
 
+export function bundleDisposedError(bundleId: string): VGPUError {
+  return new VGPUError({
+    code: "VGPU-BUNDLE-DISPOSED",
+    message: `Bundle '${bundleId}' has been disposed.`,
+    where: "bundle",
+    fix: "Record a new bundle before replaying; this bundle was disposed.",
+  });
+}
+
 export function bundleBlendConstantError(bundleId: string, drawLabel: string): VGPUError {
   return new VGPUError({
     code: "VGPU-BUNDLE-BLEND-CONSTANT",
