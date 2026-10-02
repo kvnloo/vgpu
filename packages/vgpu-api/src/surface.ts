@@ -9,6 +9,7 @@ import {
   surfaceResizeReentrantError,
 } from "./errors.ts";
 import { frameState } from "./frame-state.ts";
+import { SURFACE_TARGET } from "./draw-protocols.ts";
 import { liveKernel } from "./live-kernel.ts";
 import { serviceToken, type Gpu, type Kernel } from "./kernel.ts";
 
@@ -89,6 +90,7 @@ export function leaveFrame(): void { frameDepth -= 1; }
 export function isSurface(target: unknown): target is CanvasSurface { return target instanceof CanvasSurface; }
 
 export class CanvasSurface implements Surface {
+  readonly [SURFACE_TARGET] = true;
   readonly resourceIdentity = createResourceIdentity("render-target");
   readonly label: string | undefined;
   readonly context: GPUCanvasContext;

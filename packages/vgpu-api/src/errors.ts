@@ -3,6 +3,16 @@ import type { BindingInfo } from "@vgpu/wgsl/reflect-source";
 
 export class VGPUError extends CoreVGPUError {}
 
+export function surfaceNotBindableError(label: string, binding: BindingInfo): VGPUError {
+  return new VGPUError({
+    code: "VGPU-SURFACE-NOT-BINDABLE",
+    message: `Binding '${binding.name}' (@group(${binding.group}) @binding(${binding.binding})) in '${label}' cannot use a Surface as an input.`,
+    where: `${label}.${binding.name}`,
+    fix: "Render to an offscreen target and bind that target or its texture. Use Surface only as a render destination.",
+    detail: { binding: binding.binding, bindingName: binding.name },
+  });
+}
+
 export function destroyedBindingError(label: string, binding: BindingInfo, resourceName = "resource"): VGPUError {
   return new VGPUError({
     code: "VGPU-R1-BINDING-DESTROYED",
