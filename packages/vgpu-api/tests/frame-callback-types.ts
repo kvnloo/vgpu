@@ -10,6 +10,9 @@ import {
 declare const gpu: Gpu;
 declare const runner: FrameRunner;
 declare const promiseLikeCallback: (currentFrame: Frame) => PromiseLike<void>;
+declare const callbackFunctionUnion:
+  | ((currentFrame: Frame) => void)
+  | ((currentFrame: Frame) => Promise<void>);
 
 function syncVoid(_currentFrame: Frame): void {}
 function syncValue(_currentFrame: Frame): number { return 1; }
@@ -46,6 +49,14 @@ frame(gpu, erasedAny);
 frameLoop(gpu, erasedAny);
 runner.frame(erasedAny);
 runner.loop(erasedAny);
+
+// A declared union of callback function types with a void member can lose its Promise-returning
+// member during return inference. It currently compiles, so runtime validation remains responsible
+// for inspecting the actual result.
+frame(gpu, callbackFunctionUnion);
+frameLoop(gpu, callbackFunctionUnion);
+runner.frame(callbackFunctionUnion);
+runner.loop(callbackFunctionUnion);
 
 // The existing exported callback alias remains source-compatible.
 const exportedCallback: FrameLoopCallback = syncVoid;
