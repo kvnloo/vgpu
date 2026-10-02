@@ -108,7 +108,11 @@ try {
     await gpu.gpu.queue.onSubmittedWorkDone();
     await gpu.settled();
     const path = join(options.outDir, `${mode}.png`);
-    await writePng(path, options.size, await output.read());
+    await writePng(
+      path,
+      options.size,
+      await output.color.read({ mipLevel: 0, region: "all" }),
+    );
     console.log(path);
   }
 
