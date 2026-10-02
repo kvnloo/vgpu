@@ -235,6 +235,8 @@ When vgpu observes the loss, it stops every running `frameLoop(gpu, cb)` first a
 
 New work on the lost gpu throws `VGPU-DEVICE-LOST` at the call: every factory, `clock(gpu)`, `frame(gpu)`, and `frameLoop(gpu, cb)`. `frame(gpu)` and `frameLoop(gpu, cb)` throw before the frame clock advances and before surface auto-resize runs. A manual `frame(gpu)` that was open when the device was lost stays open: its `submit()` throws `VGPU-DEVICE-LOST` with `cause` set to the native info, until `gpu.dispose()` cancels it and `submit()` becomes a no-op.
 
+The implicit submit reports its own failures: whatever `frame.submit()` throws after a `frame(gpu, cb)` callback returns escapes `frame(gpu, cb)`, and a loop tick that fails this way stops the loop and rethrows, like a throwing callback. vgpu no longer swallows a `VGPU-DEVICE-LOST` or `VGPU-DEVICE-DISPOSED` raised there. Calling `gpu.dispose()` from inside the callback is still safe: `dispose()` cancels the open frame and stops the loop, so the implicit submit is a no-op. Disposing the core device directly (`gpu.device.dispose()`) is not `gpu.dispose()` — it cancels nothing, so the implicit submit throws `VGPU-DEVICE-DISPOSED`; tear down with `gpu.dispose()`.
+
 ### Recover from device loss
 
 Recovery is explicit: dispose the lost gpu, create a new one with `init()`, recreate its resources, and restart the loop.

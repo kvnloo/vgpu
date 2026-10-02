@@ -1,6 +1,6 @@
 import { Texture, createResourceIdentity, DestroySignal, type Device, type ResourceDestroyCallback, type ResourceIdentity, type UnsubscribeResourceDestroy } from "@vgpu/core";
 import { BUILT_IN_CLEAR_COLOR, colorValue, copyClearColor, sameSize, validateClearColor, type ClearColor } from "./target-utils.ts";
-import type { RenderPassDescriptorOptions, Target } from "./target.ts";
+import type { RenderPassDescriptorOptions, Target, TargetSignature } from "./target.ts";
 import {
   surfaceAutoResizeUnsupportedError,
   surfaceContextError,
@@ -9,7 +9,7 @@ import {
   surfaceResizeReentrantError,
 } from "./errors.ts";
 import { frameState } from "./frame-state.ts";
-import { SURFACE_TARGET } from "./draw-protocols.ts";
+import { SURFACE_TARGET, TARGET_SIGNATURE } from "./draw-protocols.ts";
 import { liveKernel } from "./live-kernel.ts";
 import { serviceToken, type Gpu, type Kernel } from "./kernel.ts";
 
@@ -97,6 +97,7 @@ export class CanvasSurface implements Surface {
   readonly autoResize: boolean;
   readonly layoutBacked: boolean;
   readonly format: GPUTextureFormat;
+  readonly #signature: TargetSignature;
   readonly #destroySignal = new DestroySignal<Target>();
   readonly #callbacks = new Set<(event: SurfaceResizeEvent) => void>();
   readonly #texturesRecreatedCallbacks = new Set<() => void>();
@@ -121,6 +122,7 @@ export class CanvasSurface implements Surface {
     this.autoResize = options.autoResize ?? (options.size ? false : this.layoutBacked);
     this.#currentDpr = effectiveDpr(options.dpr);
     this.format = options.format ?? preferredCanvasFormat();
+    this.#signature = Object.freeze({ colors: Object.freeze([this.format]), depth: undefined, sampleCount: 1 });
     const initialSize = initialCanvasSize(canvas, options, this.layoutBacked, this.#currentDpr);
     if (options.size || this.layoutBacked) setCanvasSize(canvas, initialSize);
     context.configure({
@@ -153,6 +155,11 @@ export class CanvasSurface implements Surface {
   get clearColor(): ClearColor { return copyClearColor(this.#clearColor); }
   set clearColor(value: ClearColor) { this.#clearColor = validateClearColor(value, "surface.clearColor"); }
   get disposed(): boolean { return this.#isDisposed; }
+
+  [TARGET_SIGNATURE](): TargetSignature {
+    this.#assertLive();
+    return this.#signature;
+  }
 
   resize(size: readonly [number, number]): void {
     this.#assertLive();

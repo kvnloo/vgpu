@@ -115,7 +115,7 @@ interface Draw {
 | opts.geometry | `GeometryLike` | ✖ | `undefined` | Supplies vertex/index buffers and layouts. Omit for generated vertex-index drawing. |
 | opts.set | `Record<string, unknown>` | ✖ | `undefined` | Initial `.set()` call. |
 | opts.label | `string` | ✖ | `"draw"` | Debug/error label. |
-| opts.targets | `readonly Target[]` | ✖ | `undefined` | Synchronous pre-warm sugar for the listed target signatures. In browser load paths, prefer `await draw.compile(target)`. |
+| opts.targets | `readonly Target[]` | ✖ | `undefined` | Synchronous pre-warm sugar for the listed target signatures. A live `Surface` is accepted outside a frame; its configured signature is used without acquiring a canvas texture. In browser load paths, prefer `await draw.compile(target)`. |
 | opts.instances | `number` | ✖ | `1` | Default instance count. Integer `>= 0`; per-call `instances` overrides. |
 | opts.vertices | `number` | ✖ | `3` for non-indexed, unless `geometry.vertexCount` exists | Default non-indexed vertex count. Ignored by indexed geometries. Integer `>= 0`. |
 | opts.firstInstance | `number` | ✖ | `0` | Default first instance. Integer `>= 0`; per-call `firstInstance` overrides. |
@@ -137,7 +137,7 @@ interface Draw {
 | draw.layout.n | `number` | ✔ | — | Reflected bind group index. |
 | draw.layout.opts.dynamicOffsets | `boolean` | ✖ | `false` | When `true`, returns/reuses a layout whose buffer entries have `hasDynamicOffset: true` and clears cached pipelines. |
 | draw.draw.target | `Target \| DrawCallOptions` | ✖ | `{}` | One-shot draw options. Pass a bare target for the common case, or an options bag when setting counts or offsets. |
-| opts.target | `Target` | ✖ | — | Required at runtime when an options bag is used. Use a `Surface` or an offscreen `Target`. |
+| opts.target | `Target` | ✖ | — | Required at runtime when an options bag is used. Use an offscreen `Target`, or a `Surface` while a frame is active; outside a frame a surface throws `VGPU-SURFACE-NOT-IN-FRAME`. |
 | opts.offsets | `readonly number[] \| Partial<Record<number, readonly number[]>>` | ✖ | Reflected/claimed fallback offsets | Dynamic offsets for claimed/dynamic groups. Array applies to every group; object keys by group. |
 | opts.instances | `number` | ✖ | `DrawOptions.instances ?? geometry.instanceCount ?? 1` | Per-call instance count; integer `>= 0`. |
 | opts.vertices | `number` | ✖ | `geometry.vertexCount ?? DrawOptions.vertices ?? 3` | Per-call non-indexed vertex count; indexed geometries use `geometry.indexCount`. |
@@ -180,6 +180,8 @@ interface Draw {
 
 - `VGPU-LIMIT-STORAGE-VERTEX` / `VGPU-LIMIT-STORAGE-FRAGMENT` — static storage-buffer use by a selected entry point exceeds the granted stage limit. Request the supported `requiredLimits` value, or reduce/move the storage data.
 - `VGPU-TARGET-REQUIRED` — `draw.draw()` was called without a target and the draw has none to fall back on. Pass a `Target`, or an options bag with `target`.
+- `VGPU-SURFACE-NOT-IN-FRAME` — one-shot `draw.draw()` targets a `Surface` while no frame is active. Encode surface draws inside `frame(gpu, ...)`; `compile(surface)` and `bundle(gpu, { target: surface }, ...)` can prepare outside a frame.
+- `VGPU-SURFACE-DISPOSED` — `compile()`, `compileSync()`, or `targets: [...]` received a disposed `Surface`. `compile()` throws synchronously instead of returning a rejected promise. Prepare against a live surface.
 - `VGPU-BLEND-INVALID` — unknown blend preset or malformed blend object. Use `"alpha"`, `"additive"`, `"premultiplied"`, or `{ color: { src, dst, op? }, alpha? }`.
 - `VGPU-BLEND-CONSTANT-INVALID` — `blendConstant` is not exactly four finite numbers, or no color target's effective blend uses a `"constant"`/`"one-minus-constant"` factor (the value could never apply). The effective blend of a target is its `colors[i].blend` when it has one, else the top-level `blend` — so a top-level constant factor overridden on *every* target is still dead, while a constant factor reached only through `colors[i].blend` is live. Fix the tuple, or add a constant factor to a blend that survives the per-target overrides.
 - `VGPU-WRITEMASK-INVALID` — `writeMask` is not an array, or contains a channel outside `"r"`/`"g"`/`"b"`/`"a"`.
@@ -448,6 +450,33 @@ The compute pass writes the draw arguments and the draw consumes them on the GPU
 ## Pipeline pre-warm
 
 `draw.compile(target)` asynchronously prepares one target signature and resolves to the same draw. `draw.compileSync(target)` prepares the same signature synchronously; if an async compile for that signature is still pending, the synchronous result wins the race and unblocks later draws. Both methods also accept a target signature object such as `{ colors: ["bgra8unorm"], depth: "depth24plus", sampleCount: 4 }`; `colors` is required and bare strings are rejected.
+
+Pass a live `Surface` to prepare for a canvas during loading. Preparation reads the surface's configured signature — `format`, no depth attachment, sample count 1 — and does not acquire the canvas texture, resize the canvas, or submit work, so it runs outside any frame:
+
+```ts
+import { init, draw, frameLoop, surface } from "vgpu";
+
+const gpu = await init();
+const canvasSurface = surface(gpu, document.querySelector("canvas")!);
+
+// ---cut---
+const tri = draw(gpu, {
+  shader: `
+    @vertex fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+      var p = array<vec2f, 3>(vec2f(-0.5, -0.5), vec2f(0.5, -0.5), vec2f(0.0, 0.5));
+      return vec4f(p[vi], 0, 1);
+    }
+    @fragment fn fs_main() -> @location(0) vec4f { return vec4f(1, 0.4, 0.2, 1); }
+  `,
+});
+await tri.compile(canvasSurface); // outside a frame: no canvas texture is acquired
+
+frameLoop(gpu, (currentFrame) => {
+  currentFrame.pass(canvasSurface, (pass) => pass.draw(tri)); // rendering stays inside the frame
+});
+```
+
+A surface and the equivalent signature `{ colors: [canvasSurface.format] }` share one cached pipeline, and a size-only resize keeps it valid. Keep the signature form for preparation before the surface exists.
 
 Each color/depth/sample-count variant is a different pipeline. A missed variant sync-compiles on first use, which can jank; fire-and-forget pre-warms should always use `.catch(...)` or `gpu.onError`/`gpu.settled()` will not observe the returned promise rejection. `targets: [target]` is kept as creation-time `compileSync()` sugar for non-browser hot paths.
 

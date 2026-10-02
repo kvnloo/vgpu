@@ -41,6 +41,37 @@ ocean.draw(offscreen);
 
 The pipelines are cached per signature at the device level, so those first `draw()` calls — and every draw after them — just encode work.
 
+## Pre-warming for a canvas surface
+
+A live surface works the same way, during loading and outside any frame. Pass it to `compile()`, then render through `frame()` or `frameLoop()`:
+
+```ts
+import { init, effect, frameLoop, surface } from "vgpu";
+
+const gpu = await init();
+const canvas = document.querySelector("canvas")!;
+
+// ---cut---
+const canvasSurface = surface(gpu, canvas);
+const ocean = effect(gpu, `
+  @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
+    return vec4f(uv, 0.8, 1.0);
+  }
+`);
+
+await ocean.compile(canvasSurface); // no frame needed — no canvas texture is acquired
+
+frameLoop(gpu, (currentFrame) => {
+  currentFrame.pass(canvasSurface, (pass) => pass.draw(ocean)); // drawing stays inside the frame
+});
+```
+
+`compile(canvasSurface)` reads the surface's configured render signature — its `format`, including an explicit `surface(..., { format })` override, with no depth attachment and a sample count of 1. It does not acquire the current canvas texture, read or allocate attachments, resize the canvas, notify `onResize` listeners, or submit work. `compileSync(canvasSurface)` and `draw(gpu, { targets: [canvasSurface] })` prepare the same pipeline synchronously.
+
+The signature excludes size, so resizing the surface keeps every pipeline compiled for it. Compiling against the surface or against the equivalent `{ colors: [canvasSurface.format] }` warms the same cached pipeline.
+
+> Warning: Preparation is not drawing. A one-shot `ocean.draw(canvasSurface)` outside a frame still throws `VGPU-SURFACE-NOT-IN-FRAME`; encode surface draws inside `frame(gpu, ...)` or `frameLoop(gpu, ...)`. Compiling against a disposed surface throws `VGPU-SURFACE-DISPOSED` — create a live surface first.
+
 ## Compiling without a target
 
 Sometimes the target doesn't exist yet. Pass a signature object instead: `colors` is required, `depth` and `sampleCount` are optional. For a future canvas surface using the default format, query `navigator.gpu.getPreferredCanvasFormat()` rather than assuming a format:
@@ -65,7 +96,7 @@ const canvasSurface = surface(gpu, canvas);
 frame(gpu, (frame) => frame.pass(canvasSurface, ocean));
 ```
 
-For an existing surface, use `await ocean.compile({ colors: [canvasSurface.format] })` to respect its actual format, including an explicit `surface(..., { format })` override. Passing the surface itself to `compile()` outside a frame is rejected; a signature lets you pre-warm during loading without acquiring a canvas texture. Render to surfaces through `frame()` or `frameLoop()`.
+Once the surface exists, pass it directly — `await ocean.compile(canvasSurface)` — as in the previous section. Use a signature only when you prepare before the surface is created.
 
 The signature must match the actual target's color formats, depth format, and sample count. A canvas surface has no depth attachment and a sample count of 1, so the example omits both optional fields. For offscreen targets, use their configured formats and include depth/MSAA when enabled, or pass the existing target directly to `compile()`.
 

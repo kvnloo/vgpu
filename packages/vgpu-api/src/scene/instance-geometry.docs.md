@@ -176,12 +176,11 @@ const crateDraw = draw(gpu, { shader: crateShader, geometry: crateBridge.geometr
 crateDraw.set({ camera: { viewProjection: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]) } });
 
 // ---cut---
-const crateSignature = { colors: [canvasSurface.format] }; // the surface's configuration, no canvas texture
 let crateBundle: Bundle | undefined;
 let recordedCount = -1;
 
 function recordCrates(count: number): Bundle {
-  return bundle(gpu, { target: crateSignature, label: "crates" }, (recorder) => {
+  return bundle(gpu, { target: canvasSurface, label: "crates" }, (recorder) => { // reads the surface's configuration, no canvas texture
     recorder.draw(crateDraw, { instances: count }); // the count is frozen into the bundle
   });
 }
@@ -208,7 +207,7 @@ function teardown(): void { // call it when your component unmounts
 }
 ```
 
-The bundle records against the surface's configuration signature, so it does not depend on the frame's canvas texture, and it keeps replaying when the canvas resizes. Dropping a replaced bundle also lets it be collected eventually; `dispose()` releases it at that point instead. Disposing a bundle never destroys `crateDraw`, the bridge or the base mesh.
+Recording against `canvasSurface` reads only its configured render signature, so it does not depend on the frame's canvas texture, works inside or outside a frame, and keeps replaying when the canvas resizes. Dropping a replaced bundle also lets it be collected eventually; `dispose()` releases it at that point instead. Disposing a bundle never destroys `crateDraw`, the bridge or the base mesh.
 
 ## Notes
 

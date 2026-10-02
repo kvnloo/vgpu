@@ -15,6 +15,7 @@
  */
 import type { BindingInfo, EntryPointInputInfo } from "@vgpu/wgsl/reflect-source";
 import type { NormalizedBindingResource } from "./set-resources.ts";
+import type { TargetSignature } from "./target.ts";
 
 /** @internal Implemented by values that bind themselves to a reflected buffer binding. */
 export const BINDING_RESOURCE = Symbol("vgpu.bindingResource");
@@ -45,6 +46,22 @@ export interface SurfaceTargetProtocol {
 export function isSurfaceTarget(value: unknown): value is SurfaceTargetProtocol {
   return typeof value === "object" && value !== null
     && (value as Partial<SurfaceTargetProtocol>)[SURFACE_TARGET] === true;
+}
+
+/** @internal Implemented by targets whose render signature does not require attachment access. */
+export const TARGET_SIGNATURE = Symbol("vgpu.targetSignature");
+
+/** A target that can expose immutable render configuration without acquiring its attachments. */
+export interface TargetSignatureProvider {
+  [TARGET_SIGNATURE](): TargetSignature;
+}
+
+/** Returns configured render metadata without importing or recognizing the target implementation. */
+export function targetSignatureOf(value: unknown): TargetSignature | undefined {
+  const method = typeof value === "object" && value !== null
+    ? (value as Partial<TargetSignatureProvider>)[TARGET_SIGNATURE]
+    : undefined;
+  return typeof method === "function" ? method.call(value) : undefined;
 }
 
 /** @internal Resolves named geometry attributes against reflected shader inputs. */

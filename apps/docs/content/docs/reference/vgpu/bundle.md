@@ -35,7 +35,7 @@ interface Bundle {
 | Param | Type | Required | Default | Notes |
 |---|---|---:|---|---|
 | bundle.opts | `BundleOptions` | ✔ | — | Recording options. |
-| opts.target | `Target \| TargetSignature` | ✔ | — | Formats, depth format, and sample count are recorded. Signature form is `{ colors: [...], depth?, sampleCount? }`; `colors` is required. A `Surface` is accepted only inside a frame callback; outside a frame, pass the surface's configuration as a signature: `{ colors: [canvasSurface.format] }`. |
+| opts.target | `Target \| TargetSignature` | ✔ | — | Formats, depth format, and sample count are recorded. Signature form is `{ colors: [...], depth?, sampleCount? }`; `colors` is required. A live `Surface` is accepted inside or outside a frame: recording reads its configured signature — `format`, no depth attachment, sample count 1 — without acquiring a canvas texture. Before the surface exists, pass a signature such as `{ colors: [navigator.gpu.getPreferredCanvasFormat()] }`. |
 | opts.label | `string` | ✖ | `` `bundle${n}` `` | Bundle id and GPU label. Auto id increments from `bundle1`. |
 | bundle.cb | `(recorder: BundleRecorder) => void` | ✔ | — | Called immediately to encode commands. |
 | recorder.draw.drawable | `Draw \| Effect` | ✔ | — | Draw or fullscreen effect to encode into the bundle. |
@@ -52,10 +52,9 @@ interface Bundle {
 - `VGPU-R3-BUNDLE-STALE` from `FramePass.bundles()` when a recorded draw's bound resource identity or claimed group changed after recording, or a captured resource was destroyed — record a new bundle, swap it in, then `dispose()` the old one. This staleness is permanent and the message always names the first change, even after later rebinds.
 - `VGPU-BUNDLE-DISPOSED` from `bundle.gpu` or `FramePass.bundles()` after `dispose()` — record a new bundle before replaying; this bundle was disposed.
 - `VGPU-R3-BUNDLE-INVALID` when replay receives an object not created by `bundle()` — pass the value `bundle(gpu, ...)` returned.
-- `VGPU-SURFACE-NOT-IN-FRAME` when `opts.target` is a `Surface` and no frame is active — record against `{ colors: [canvasSurface.format] }` instead, or record inside the frame callback.
 - `VGPU-BUNDLE-BLEND-CONSTANT` when recording a draw with `blendConstant` — the blend constant is render-pass state that render bundle encoders cannot set; encode such draws in a frame pass instead.
 - `VGPU-BUNDLE-STENCIL-REF` when recording a draw whose `stencil` has `ref` — the stencil reference is likewise render-pass state; stencil state without `ref` records fine.
-- `VGPU-SURFACE-DISPOSED` when replaying against a disposed surface.
+- `VGPU-SURFACE-DISPOSED` when `opts.target` is a disposed surface, or when replaying against a disposed surface — record and replay against a live `surface(gpu, canvas)`.
 - Draw binding errors such as `VGPU-R1-BINDING-NEVER-SET` can throw during recording. A recording that throws returns no bundle and leaves nothing registered on the draws or resources it touched.
 
 `FramePass.bundles()` checks every bundle in the list before replaying any: one stale or disposed entry means none of the list replays.
@@ -84,7 +83,7 @@ frame(gpu, (currentFrame) => {
 });
 ```
 
-Record for a canvas outside a frame by passing the surface's configuration as a signature. The bundle keeps replaying after the canvas resizes, because the signature does not include size:
+Record for a canvas during loading by passing the live surface as the target, then replay inside a frame. The bundle keeps replaying after the canvas resizes, because the signature does not include size:
 
 ```ts
 import { init, bundle, effect, frameLoop, surface } from "vgpu";
@@ -94,14 +93,16 @@ const canvasSurface = surface(gpu, document.querySelector("canvas")!);
 const background = effect(gpu, `@fragment fn fs_main() -> @location(0) vec4f { return vec4f(0.1, 0.2, 0.4, 1); }`);
 
 // ---cut---
-const statics = bundle(gpu, { target: { colors: [canvasSurface.format] }, label: "surfaceStatics" }, (recorded) => {
+const statics = bundle(gpu, { target: canvasSurface, label: "surfaceStatics" }, (recorded) => {
   recorded.draw(background);
-}); // no canvas texture is acquired here
+}); // outside any frame: reads canvasSurface.format, acquires no canvas texture
 
 frameLoop(gpu, (currentFrame) => {
   currentFrame.pass({ target: canvasSurface }, (pass) => pass.bundles(statics)); // no re-record on resize
 });
 ```
+
+Recording reads the surface's configured signature only. It does not acquire the current canvas texture, read or allocate attachments, resize the canvas, notify `onResize` listeners, or submit work.
 
 Replace a bundle when something it samples changes. Record the next bundle first, swap your reference, then dispose the old one — if recording throws, the old bundle is still in place:
 
@@ -126,7 +127,7 @@ let post: Bundle | undefined;
 
 canvasSurface.onResize(({ width, height }) => {
   sceneTarget.resize([width, height]); // new textures: a bundle sampling the old ones is stale
-  const next = bundle(gpu, { target: { colors: [canvasSurface.format] }, label: "post" }, (recorded) => {
+  const next = bundle(gpu, { target: canvasSurface, label: "post" }, (recorded) => {
     recorded.draw(postEffect);
   });
   const previous = post;
@@ -182,7 +183,7 @@ shader.draw(colorTarget); // the effect was borrowed, not destroyed
 
 `bundle(gpu, { target: { colors: ["bgra8unorm"], depth: "depth24plus", sampleCount: 4 } }, cb)` records before a target exists. This relaxes only the replay target: any resources sampled by draws still need to be set before recording. Cold signature recording creates missing pipelines synchronously, which can jank; pre-warm first with `await draw.compile(signature)` or `await effect.compile(signature)`.
 
-For future canvas surfaces, use `navigator.gpu.getPreferredCanvasFormat()` when building the signature; for an existing surface, use `{ colors: [canvasSurface.format] }`. A bundle recorded for `bgra8unorm` will not replay on an `rgba8unorm` surface, and the stale error prints both keys.
+For future canvas surfaces, use `navigator.gpu.getPreferredCanvasFormat()` when building the signature; for an existing surface, pass the surface itself. A surface and an equivalent signature such as `{ colors: [canvasSurface.format] }` produce the same signature key, so either form records a bundle that replays on that surface. A bundle recorded for `bgra8unorm` will not replay on an `rgba8unorm` surface, and the stale error prints both keys.
 
 ## Lifetime
 
@@ -201,7 +202,7 @@ A bundle that becomes permanently stale — a captured resource was rebound or d
 - Replace bundles in this order: record the next bundle, swap your reference, then `dispose()` the old one. Disposing first leaves you with nothing to replay if the new recording throws.
 - `surface.onResize(...)` fires immediately, so the same re-recording callback can initialize and refresh bundles that sample resized resources.
 - Bundles freeze bind group identities, not buffer contents. Updating JS-owned packed values in-place is safe, and `set()` uniform updates keep reaching every live bundle that recorded the draw, including native handles read from `bundle.gpu`. Rebinding a different texture/buffer/sampler stales the bundle.
-- Do not record against a `Surface` object outside a frame; it throws `VGPU-SURFACE-NOT-IN-FRAME`. Pass `{ colors: [canvasSurface.format] }` instead.
+- Record against a live `Surface` inside or outside a frame; recording uses its configured signature and never acquires a canvas texture. Replay stays inside `frame(gpu)` or `frameLoop(gpu)`, because `pass.bundles()` exists only on a frame pass. Recording against a disposed surface throws `VGPU-SURFACE-DISPOSED`.
 - Neither garbage collection nor `dispose()` frees GPU or driver memory on a schedule. Call `dispose()` when you replace or tear down bundles and want vgpu's references and registrations released synchronously.
 - Draws with `blendConstant` cannot be recorded: render bundle encoders have no way to set the pass blend constant. Recording throws `VGPU-BUNDLE-BLEND-CONSTANT`; use `FramePass.draw` for those draws.
 - Draws whose `stencil` has `ref` cannot be recorded either: render bundle encoders have no way to set the pass stencil reference. Recording throws `VGPU-BUNDLE-STENCIL-REF`; stencil pipeline state without `ref` records fine.

@@ -3,8 +3,7 @@ import { assertDrawGeometryUsable, InternalDraw, drawUsesBlendConstant, drawUses
 import { InternalEffect, effectDraw, type Effect } from "./effect.ts";
 import type { CompileTarget, Target, TargetSignature } from "./target.ts";
 import { normalizeSignature, signatureKeyOf, validateTargetSignature } from "./pipeline-store.ts";
-import { bundleBlendConstantError, bundleDisposedError, bundleStencilReferenceError, surfaceNotInFrameError, VGPUError } from "./errors.ts";
-import { isFrameActive, isSurface } from "./surface.ts";
+import { bundleBlendConstantError, bundleDisposedError, bundleStencilReferenceError, VGPUError } from "./errors.ts";
 import { FRAME_BUNDLE, type FrameBundleProtocol } from "./frame-protocols.ts";
 import { liveKernel } from "./live-kernel.ts";
 import type { Gpu } from "./kernel.ts";
@@ -15,8 +14,8 @@ import type { Gpu } from "./kernel.ts";
  *
  * A bundle freezes its commands, its bind groups and the target signature it was recorded for; the
  * recorded state is re-checked at replay and a mismatch throws `VGPU-R3-BUNDLE-STALE` instead of
- * drawing something stale. Recording against a `Surface` is only legal inside a frame, because the
- * surface's current texture — and therefore its format — is only defined there.
+ * drawing something stale. A live `Surface` can supply its configured signature for recording
+ * outside a frame without acquiring a presentation texture; replay still belongs inside a frame.
  */
 export function bundle(gpu: Gpu, opts: BundleOptions, record: (recorder: BundleRecorder) => void): Bundle {
   return createBundle(liveKernel(gpu, "bundle").device, opts, record);
@@ -49,7 +48,6 @@ const bundleResourceFinalizer = new FinalizationRegistry<Set<() => void>>((subsc
 /** Records explicit WebGPU render bundles and keeps the R3 stale signature checked at replay time. */
 export function createBundle(device: { readonly gpu: GPUDevice }, opts: BundleOptions, record: (recorder: BundleRecorder) => void): Bundle {
   const id = opts.label ?? `bundle${nextBundleId++}`;
-  if (isSurface(opts.target) && !isFrameActive()) throw surfaceNotInFrameError("bundle");
   const signature = normalizeBundleSignature(opts.target);
   const bundle = new RecordedBundle(device, id, signature);
   bundle.record(record);
