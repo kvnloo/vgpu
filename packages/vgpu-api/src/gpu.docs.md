@@ -19,6 +19,8 @@ import type { ShaderSource } from "vgpu";
 interface Gpu {
   readonly device: Device;
   readonly gpu: GPUDevice;
+  /** Stable, never rejects. Resolves once with the native info when vgpu observes device loss while this gpu is active; stays pending otherwise. */
+  readonly lost: Promise<GPUDeviceLostInfo>;
   /** True once `dispose()` ran. Reads stay legal; new work does not. */
   readonly disposed: boolean;
   dispose(): void;
@@ -89,9 +91,9 @@ declare function clock(gpu: Gpu): Clock;
 | onError.cb | `GpuErrorListener` | ✔ | — | Receives asynchronous vgpu errors; returns an unsubscribe function. |
 | clock | — | — | — | No parameters. The frame clock of this gpu: `{ time, deltaTime, frameCount, advance(dtSeconds) }`, one instance per gpu. See `Clock`. |
 
-**Returns:** each factory returns the resource named in its signature. `dispose()` returns `void`. Frame callbacks are synchronous: a non-thenable return value is ignored. `onError(cb)` returns its unsubscribe function. `settled()` returns a `Promise<void>` that always fulfills — see "Wait for submitted work" below.
+**Returns:** each factory returns the resource named in its signature. `dispose()` returns `void`. Frame callbacks are synchronous: a non-thenable return value is ignored. `onError(cb)` returns its unsubscribe function. `settled()` returns a `Promise<void>` that always fulfills — see "Wait for submitted work" below. `gpu.lost` is a property, not a method: the same `Promise<GPUDeviceLostInfo>` on every read — see "Device loss" below.
 
-**Throws:** `VGPU-GPU-DISPOSED` when any factory (or `clock(gpu)`) runs after `gpu.dispose()` — the device and everything it owned are gone, so the handle it would return could only fail later; create resources before disposing, or `init()` a new gpu; `VGPU-GPU-FOREIGN` when the first argument was not created by `init()` (a plain object, a `GPUDevice`, a gpu from another library): it carries no vgpu kernel, so pass the object returned by `init()` from `vgpu`, `vgpu/node` or `vgpu/mock`; `VGPU-LIMIT-STORAGE-VERTEX` / `VGPU-LIMIT-STORAGE-FRAGMENT` when a selected render entry exceeds its granted storage-buffer limit. The structured detail reports `stage`, `entryPoint`, `count`, `limit`, and each counted binding's `name`, `group`, and `binding`; request a supported limit or reduce/move the data; `VGPU-SHADER-SOURCE-INVALID` for malformed `ShaderSource`; `VGPU-SET-VALUE-INVALID` when a JS-owned buffer value does not exactly match its reflected WGSL shape, integer range, or runtime extent; `VGPU-SET-TEXTURE-FILTERABILITY` when a known facade texture format cannot satisfy an ordinarily sampled float binding (detail reports format, texture binding/name/label, and paired sampler identity); `VGPU-RING1-UNSUPPORTED` for unsupported effect/compute/target cases; `VGPU-TARGET-REQUIRED` when one-shot drawing needs an explicit target; `VGPU-TARGET-SIZE-REQUIRED` for runtime JS calls to `target(gpu)` without `size`; `VGPU-SURFACE-*` errors from `surface()`, surface resize, surface readback, or using disposed surfaces; `VGPU-ASYNC-FRAME-CALLBACK` when a `frame(gpu, cb)` / `frameLoop(gpu, cb)` callback returns a thenable — the open frame is canceled before its implicit submit, so await preparation before `frame()`/`frameLoop()` and keep the frame callback synchronous; plus method-specific `VGPU-R1-*`, `VGPU-R3-*`, and `VGPU-R4-*` errors documented on `Effect`, `Draw`, `Compute`, `Frame`, `Bundle`, `Target`, and `SharedUniforms`.
+**Throws:** `VGPU-GPU-DISPOSED` when any factory (or `clock(gpu)`) runs after `gpu.dispose()` — the device and everything it owned are gone, so the handle it would return could only fail later; create resources before disposing, or `init()` a new gpu; `VGPU-DEVICE-LOST` when any factory (or `clock(gpu)`, `frame(gpu)`, `frameLoop(gpu)`) runs on an active gpu after vgpu observed device loss — thrown at the call, before the frame clock advances or surface auto-resize runs, with `cause` set to the native `GPUDeviceLostInfo`; create a new Gpu with `init()`, then recreate its resources and restart the loop (after `gpu.dispose()`, `VGPU-GPU-DISPOSED` takes precedence); `VGPU-GPU-FOREIGN` when the first argument was not created by `init()` (a plain object, a `GPUDevice`, a gpu from another library): it carries no vgpu kernel, so pass the object returned by `init()` from `vgpu`, `vgpu/node` or `vgpu/mock`; `VGPU-LIMIT-STORAGE-VERTEX` / `VGPU-LIMIT-STORAGE-FRAGMENT` when a selected render entry exceeds its granted storage-buffer limit. The structured detail reports `stage`, `entryPoint`, `count`, `limit`, and each counted binding's `name`, `group`, and `binding`; request a supported limit or reduce/move the data; `VGPU-SHADER-SOURCE-INVALID` for malformed `ShaderSource`; `VGPU-SET-VALUE-INVALID` when a JS-owned buffer value does not exactly match its reflected WGSL shape, integer range, or runtime extent; `VGPU-SET-TEXTURE-FILTERABILITY` when a known facade texture format cannot satisfy an ordinarily sampled float binding (detail reports format, texture binding/name/label, and paired sampler identity); `VGPU-RING1-UNSUPPORTED` for unsupported effect/compute/target cases; `VGPU-TARGET-REQUIRED` when one-shot drawing needs an explicit target; `VGPU-TARGET-SIZE-REQUIRED` for runtime JS calls to `target(gpu)` without `size`; `VGPU-SURFACE-*` errors from `surface()`, surface resize, surface readback, or using disposed surfaces; `VGPU-ASYNC-FRAME-CALLBACK` when a `frame(gpu, cb)` / `frameLoop(gpu, cb)` callback returns a thenable — the open frame is canceled before its implicit submit, so await preparation before `frame()`/`frameLoop()` and keep the frame callback synchronous; plus method-specific `VGPU-R1-*`, `VGPU-R3-*`, and `VGPU-R4-*` errors documented on `Effect`, `Draw`, `Compute`, `Frame`, `Bundle`, `Target`, and `SharedUniforms`.
 
 ## Examples
 
@@ -220,14 +222,84 @@ gpu.dispose();
 
 `settled()` fulfills even if the frame failed; read `errors` to find out. `dispose()` is the teardown signal — it stops loops and releases resources; do not wait for device loss to tear down a gpu you own. For a gpu from `initFromDevice(device)`, `dispose()` releases the vgpu wrapper and leaves the borrowed device to its owner.
 
+## Device loss
+
+`gpu.lost` is a loss-only notification. It is one stable `Promise<GPUDeviceLostInfo>` — every read returns the same promise — that resolves once, with the native `GPUDeviceLostInfo`, when vgpu observes native device loss while the gpu is active. It never rejects, even when the native `GPUDevice.lost` promise rejects. If the device is never lost, or `gpu.dispose()` runs first, it stays pending forever.
+
+When vgpu observes the loss, it stops every running `frameLoop(gpu, cb)` first and only then resolves `gpu.lost`, so your handlers run after the loops are already stopped: no further tick runs, and no tick throws `VGPU-DEVICE-LOST`. Nothing else happens automatically:
+
+- The gpu is not disposed: `gpu.disposed` stays `false`, and `gpu.dispose()`, `gpu.onError(cb)`, and `gpu.settled()` stay callable.
+- Resources are not destroyed. vgpu does not release your targets, surfaces, or pipelines for you; `gpu.dispose()` does that.
+- Nothing is delivered to `gpu.onError` for the loss itself. Errors already in flight — a `frame.done` validation, a pipeline compilation — keep their existing channels and arrive at most once, as before.
+- Nothing recovers. The lost device cannot be reused.
+
+New work on the lost gpu throws `VGPU-DEVICE-LOST` at the call: every factory, `clock(gpu)`, `frame(gpu)`, and `frameLoop(gpu, cb)`. `frame(gpu)` and `frameLoop(gpu, cb)` throw before the frame clock advances and before surface auto-resize runs. A manual `frame(gpu)` that was open when the device was lost stays open: its `submit()` throws `VGPU-DEVICE-LOST` with `cause` set to the native info, until `gpu.dispose()` cancels it and `submit()` becomes a no-op.
+
+### Recover from device loss
+
+Recovery is explicit: dispose the lost gpu, create a new one with `init()`, recreate its resources, and restart the loop.
+
+```ts
+import { init, effect, frameLoop, surface } from "vgpu";
+
+const canvas = document.querySelector("canvas")!;
+const statusBanner = document.querySelector("#gpu-status")!;
+const backgroundSource = `@fragment fn fs_main() -> @location(0) vec4f { return vec4f(0.1, 0.3, 0.6, 1.0); }`;
+
+// ---cut---
+async function start(): Promise<void> {
+  const gpu = await init();
+  const canvasSurface = surface(gpu, canvas);
+  const background = effect(gpu, backgroundSource);
+  frameLoop(gpu, (currentFrame) => {
+    currentFrame.pass(canvasSurface, background);
+  });
+
+  void gpu.lost
+    .then((info) => {
+      // the loop already stopped; gpu.disposed is still false
+      statusBanner.textContent = `GPU lost (${info.reason}), restarting…`;
+      gpu.dispose(); // release the old surface before a new gpu configures the canvas
+      return start(); // new Gpu, new resources, new loop
+    })
+    .catch((error: unknown) => {
+      statusBanner.textContent = "The GPU could not be restarted.";
+      console.error(error);
+    });
+}
+
+await start();
+```
+
+`gpu.lost` cannot reject, but your handler can: `init()` may reject on the restart, and DOM code may throw. The `.catch()` handles failures of your recovery path, not of `gpu.lost`. Dispose the lost gpu before creating the new surface — disposing a surface unconfigures its canvas, so disposing the old gpu afterwards would unconfigure the canvas under the new one.
+
+> Warning: Do not `await gpu.lost` to tear down. It stays pending for a healthy device and after `gpu.dispose()`, so teardown would hang. Normal unmount is unchanged: stop the loop, `await gpu.settled()` when you need submitted work and deliveries to finish, then `gpu.dispose()`.
+
+### Loss versus disposal
+
+`gpu.dispose()` is your own teardown, not loss. What decides the outcome is whether vgpu observed the loss before `dispose()` ran — vgpu reads the native `GPUDevice.lost` promise asynchronously — not the native `reason`:
+
+| Sequence | `gpu.lost` | `gpu.disposed` | Loops | Open manual frame's `submit()` | Native device |
+|---|---|---|---|---|---|
+| Native loss observed while the gpu is active | Resolves with the native info | `false` | Stopped before `gpu.lost` handlers run | Throws `VGPU-DEVICE-LOST` | Lost |
+| `gpu.dispose()` before vgpu observes loss, including a loss the native promise reported but vgpu had not read yet | Stays pending | `true` | Stopped by `dispose()` | No-op: `dispose()` canceled it | Owned: destroyed by `dispose()`. Borrowed: untouched |
+| `gpu.dispose()` after observed loss | Keeps its resolved value | `true` | Already stopped | No-op: `dispose()` canceled it | Owned: not destroyed again. Borrowed: untouched |
+| The owner destroys a borrowed device while the wrapper is active | Resolves, with `reason: "destroyed"` | `false` | Stopped before `gpu.lost` handlers run | Throws `VGPU-DEVICE-LOST` | Destroyed by its owner |
+
+For a gpu from `initFromDevice(device)`, `gpu.dispose()` never destroys the borrowed device, and a loss that arrives after it is not reported. A destroy by the device's owner while the wrapper is active is a loss like any other, even though its reason is `"destroyed"`.
+
+`gpu.settled()` never waits for `gpu.lost`. A `settled()` call made before the loss keeps the queue fence, deliveries, and sources it already captured; one made after the loss or after `dispose()` creates no new fence — see "After device loss or `dispose()`" above.
+
 ## Notes
 
 - There is no implicit screen property and no implicit default target. Pass `target` explicitly to frame passes and one-shot draws.
 - Canvas-specific `size`, `dpr`, and `autoResize` live on `surface(gpu, canvas, opts)`, not on `init()`.
 - Time is explicit JS state, and it lives on the clock, not on the context: read `clock(gpu).time` / `.deltaTime` / `.frameCount` and pass them through `set()` or `SharedUniforms` when shaders need them.
 - Await asynchronous setup — `await init()`, `await simulation.compile()` on a `Compute`, asset loading — before `frame(gpu, cb)` or `frameLoop(gpu, cb)`, and run async teardown such as `await gpu.settled()` after the frame returns or the loop is stopped. The frame callback itself stays synchronous.
-- Every factory rejects a disposed gpu with `VGPU-GPU-DISPOSED`, and an object vgpu did not create with `VGPU-GPU-FOREIGN`. Both are thrown synchronously, from the call that made the mistake.
-- **See also:** `init`, `Clock`, `Surface`, `Effect`, `Draw`, `Compute`, `Frame`, `Target`, `Bundle`, `SharedUniforms`, `Timer`, `Visibility`.
+- Every factory rejects a disposed gpu with `VGPU-GPU-DISPOSED`, an active gpu whose device loss vgpu observed with `VGPU-DEVICE-LOST`, and an object vgpu did not create with `VGPU-GPU-FOREIGN`. All three are thrown synchronously, from the call that made the mistake.
+- Subscribe to `gpu.lost`, not to the native `gpu.gpu.lost`, when you need the loops stopped first. Only `gpu.lost` handlers are guaranteed to run after vgpu stops the loops; a handler on the native promise — for example one the owner of a borrowed device attached before `initFromDevice(device)` — can run first.
+- There is no lifecycle-state getter, no loss event channel, and no public way to simulate loss in `vgpu/mock`. Read `gpu.disposed` for your own teardown and subscribe to `gpu.lost` for loss.
+- **See also:** `init`, `Device`, `Clock`, `Surface`, `Effect`, `Draw`, `Compute`, `Frame`, `Target`, `Bundle`, `SharedUniforms`, `Timer`, `Visibility`.
 
 ## Sampled float texture layouts
 

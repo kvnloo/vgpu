@@ -218,3 +218,54 @@ Cancellation still covers only the frame's own command buffer. A `frame.submit()
 > Warning: Do not hide async frame work behind `void`, a cast, or a wrapper that erases the return type. The runtime check stops the frame from submitting half-encoded, but it cannot make the continuation's work reach the GPU. Await first, then call `frame(gpu)`.
 
 Compute-pass callbacks keep their own check: a `computePass(...)` callback that returns a thenable throws `VGPU-COMPUTE-PASS-ASYNC`.
+
+## When the device is lost
+
+A GPU device can be lost — a driver reset, the GPU process crashing, or the owner of a borrowed device destroying it. When vgpu observes the loss, it stops every running `frameLoop(gpu)` first, then resolves [`gpu.lost`](/reference/vgpu/gpu#gpu). No tick runs after that and none throws, so the loss does not surface as an uncaught error from an animation-frame callback. The gpu is not disposed and nothing recovers on its own: restart on a new gpu from `init()`.
+
+The loop from the previous section, restarted after loss:
+
+```ts
+import { init, compute, effect, frameLoop, storage, surface } from "vgpu";
+
+const canvas = document.querySelector("canvas")!;
+const simulationSource = `
+  @group(0) @binding(0) var<storage, read_write> particles: array<vec4f>;
+  @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3u) {
+    particles[id.x] += vec4f(0.0, -0.01, 0.0, 0.0);
+  }
+`;
+const shadeSource = `@fragment fn fs_main() -> @location(0) vec4f { return vec4f(0.1, 0.2, 0.4, 1.0); }`;
+
+// ---cut---
+async function start(): Promise<void> {
+  const gpu = await init(); // a new device every time
+  const canvasTarget = surface(gpu, canvas);
+  const particles = storage(gpu, 64 * 16);
+  const simulation = compute(gpu, simulationSource, { set: { particles } });
+  const shade = effect(gpu, shadeSource);
+  await simulation.compile();
+
+  frameLoop(gpu, (currentFrame) => {
+    currentFrame.computePass((pass) => pass.dispatch(simulation, 1));
+    currentFrame.pass(canvasTarget, shade);
+  });
+
+  void gpu.lost
+    .then(() => {
+      gpu.dispose(); // the loop already stopped; release the old surface and resources
+      return start(); // recreate everything on a new gpu and restart the loop
+    })
+    .catch((error: unknown) => console.error("GPU restart failed", error));
+}
+
+await start();
+```
+
+Every resource belongs to the gpu that created it, so the restart recreates the surface, storage, and pipelines instead of reusing them. `gpu.lost` never rejects; the `.catch()` is for the restart itself, which can fail when `init()` rejects. Dispose the lost gpu before the new one creates its surface, so the old surface releases the canvas first.
+
+On the lost gpu, `frame(gpu)` and `frameLoop(gpu)` throw `VGPU-DEVICE-LOST` before the frame clock advances or surface auto-resize runs. vgpu does not cancel a manual `frame(gpu)` that was open at the time: its `submit()` throws `VGPU-DEVICE-LOST` rather than silently dropping the work, until `gpu.dispose()` cancels it.
+
+> Warning: Do not `await gpu.lost` to tear down. It stays pending while the device is healthy and after `gpu.dispose()`, so the teardown would never run. Unmount the same way as before: `handle.stop()`, `await gpu.settled()` when you need submitted work and deliveries to finish, then `gpu.dispose()`.
+
+`gpu.dispose()` is your teardown, not a loss: disposing before vgpu observed any loss leaves `gpu.lost` pending, and disposing a gpu from `initFromDevice(device)` never destroys the borrowed device. The [`Gpu` reference](/reference/vgpu/gpu#gpu) lists every loss-versus-disposal ordering.
