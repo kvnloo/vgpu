@@ -41,3 +41,19 @@ export interface GeometryLayoutResolvable {
   /** Resolves and validates concrete shader locations for a vertex entry point. */
   [geometryLayoutResolver](inputs: readonly EntryPointInputInfo[], where: string): readonly GPUVertexBufferLayout[];
 }
+
+/** @internal Asserts that captured geometry buffers are still valid immediately before use. */
+export const geometryLiveness = Symbol("vgpu.geometry.liveness");
+
+/** @internal Implemented by owned geometries and slices. */
+export interface GeometryLive {
+  [geometryLiveness](where: string): void;
+}
+
+/** Returns the optional geometry liveness protocol without importing its implementation. */
+export function geometryLivenessOf(value: unknown): GeometryLive | undefined {
+  const method = typeof value === "object" && value !== null
+    ? (value as Partial<GeometryLive>)[geometryLiveness]
+    : undefined;
+  return typeof method === "function" ? value as GeometryLive : undefined;
+}
