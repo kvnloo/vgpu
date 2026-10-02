@@ -11,6 +11,8 @@
 import { Device, validateRequiredFeatures, type RequiredDeviceLimits, type VGPUAdapter } from "@vgpu/core";
 import type { GpuErrorListener } from "./api-types.ts";
 import { unsupportedError, VGPUError } from "./errors.ts";
+import { isDeviceUsable } from "./lifecycle.ts";
+import { submittedWorkDone } from "./submitted-work-done.ts";
 
 /**
  * Options for the device vgpu creates and owns; it destroys that device on `dispose()`.
@@ -185,10 +187,18 @@ class KernelImpl implements Kernel {
   }
 
   async settled(): Promise<void> {
+    const queueFence = !this.#disposed && isDeviceUsable(this.device)
+      ? submittedWorkDone(this.device)
+      : undefined;
+    const sources = [...this.#settledSources];
     const snapshot = [
       ...this.#pendingDeliveries,
-      ...[...this.#settledSources].flatMap((source) => source()),
+      ...sources.flatMap((source) => {
+        try { return source(); }
+        catch (error) { return [Promise.reject(error)]; }
+      }),
     ];
+    if (queueFence) snapshot.push(queueFence);
     await Promise.allSettled(snapshot);
   }
 
