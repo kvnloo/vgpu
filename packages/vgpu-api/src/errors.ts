@@ -530,7 +530,7 @@ export function surfaceNotInFrameError(where: string): VGPUError {
   return new VGPUError({
     code: "VGPU-SURFACE-NOT-IN-FRAME",
     message: "Surface targets are only available inside frame(gpu).",
-    fix: "surface passes must run inside frame(gpu, ...); precompile against an offscreen target(gpu, ...) instead",
+    fix: "Encode surface draws inside frame(gpu, ...); compile(surface) and bundle(gpu, { target: surface }, ...) can prepare outside a frame.",
     where,
   });
 }
