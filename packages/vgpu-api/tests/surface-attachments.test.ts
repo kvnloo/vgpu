@@ -193,6 +193,65 @@ test("an immediate onResize subscription cannot clear an outer texture-recreated
   }
 });
 
+test.each([
+  { name: "default", attachments: {} },
+  { name: "depth+MSAA", attachments: { depth: true, msaa: true } },
+] as const)("direct canvas drift stays silent after an earlier offscreen pass on a $name Surface", async ({ attachments }) => {
+  const gpu = await init();
+  try {
+    const canvas = canvasFixture(8, 6);
+    const screen = surface(gpu, canvas.canvas, {
+      autoResize: false,
+      format: "rgba8unorm",
+      size: [8, 6],
+      ...attachments,
+    }) as CanvasSurface;
+    const derived = target(gpu, { size: [8, 6], format: "rgba8unorm" });
+    const oldDerivedColor = derived.color;
+    const oldDepth = screen.depth;
+    const publicResizes: Array<readonly [number, number]> = [];
+    const recreated = vi.fn();
+    screen.onTexturesRecreated(recreated);
+    screen.onResize(({ width, height }) => {
+      publicResizes.push([width, height]);
+      derived.resize([width, height]);
+    });
+    publicResizes.length = 0;
+
+    const offscreenDraw = effect(gpu, `@fragment fn fs_main() -> @location(0) vec4f { return vec4f(0, 0, 1, 1); }`);
+    const surfaceDraw = draw(gpu, { shader: FULLSCREEN, label: "surface-after-external-drift" });
+    frame(gpu, (current) => {
+      current.pass(derived, offscreenDraw);
+      canvas.canvas.width = 12;
+      canvas.canvas.height = 9;
+
+      surfaceDraw.compileSync(screen);
+      expect(canvas.getCurrentTexture).not.toHaveBeenCalled();
+      expect(screen.depth).toBe(oldDepth);
+      expect(recreated).not.toHaveBeenCalled();
+
+      current.pass(screen, surfaceDraw);
+    });
+
+    expect(publicResizes).toEqual([]);
+    expect(derived.size).toEqual([8, 6]);
+    expect(derived.color).toBe(oldDerivedColor);
+    expect(() => oldDerivedColor.view).not.toThrow();
+    expect(recreated).toHaveBeenCalledTimes(1);
+    expect(screen.size).toEqual([12, 9]);
+    expect(canvas.getCurrentTexture).toHaveBeenCalledTimes(1);
+    if (oldDepth) {
+      expect(screen.depth).not.toBe(oldDepth);
+      expect(screen.depth?.size).toEqual([12, 9]);
+      expect(() => oldDepth.view).toThrowError(/destroyed/i);
+    } else {
+      expect(screen.depth).toBeUndefined();
+    }
+  } finally {
+    gpu.dispose();
+  }
+});
+
 test("render reconciliation aborts before presentation acquisition when external canvas drift cannot allocate", async () => {
   const gpu = await init();
   try {
@@ -203,9 +262,11 @@ test("render reconciliation aborts before presentation acquisition when external
       format: "rgba8unorm",
       msaa: true,
       size: [8, 6],
-    });
+    }) as CanvasSurface;
     const oldDepth = screen.depth!;
     const resized = vi.fn();
+    const recreated = vi.fn();
+    screen.onTexturesRecreated(recreated);
     screen.onResize(resized);
     resized.mockClear();
     canvas.canvas.width = 14;
@@ -219,6 +280,7 @@ test("render reconciliation aborts before presentation acquisition when external
     expect(screen.size).toEqual([14, 9]);
     expect(screen.depth).toBe(oldDepth);
     expect(() => oldDepth.view).not.toThrow();
+    expect(recreated).not.toHaveBeenCalled();
     expect(resized).not.toHaveBeenCalled();
 
     createTexture.mockRestore();
@@ -227,7 +289,8 @@ test("render reconciliation aborts before presentation acquisition when external
     expect(screen.depth).not.toBe(oldDepth);
     expect(screen.depth?.size).toEqual([14, 9]);
     expect(() => oldDepth.view).toThrowError(/destroyed/i);
-    expect(resized).toHaveBeenCalledWith(expect.objectContaining({ width: 14, height: 9 }));
+    expect(recreated).toHaveBeenCalledTimes(1);
+    expect(resized).not.toHaveBeenCalled();
   } finally {
     gpu.dispose();
   }

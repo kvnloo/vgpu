@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { draw, effect, frame, geometry, init, surface } from "../../src/node.ts";
+import { draw, effect, frame, geometry, init, surface, target } from "../../src/node.ts";
 import { instanceGeometry } from "../../src/scene/instance-geometry.ts";
 import { instances } from "../../src/scene/instances.ts";
 
@@ -92,6 +92,40 @@ describe.skipIf(process.env.VGPU_DOCKER_TEST !== "1")("Surface depth/MSAA native
       const resized = await multisampled.color.read({ mipLevel: 0, region: "all" });
       expect(resized.byteLength).toBe(20 * 12 * 4);
       expect(pixelAt(resized, 20, 10, 6)).toEqual([0, 255, 255, 255]);
+    } finally {
+      gpu.dispose();
+    }
+  });
+
+  test("external canvas drift after an offscreen pass stays silent and preserves the encoded attachments", async () => {
+    const gpu = await init();
+    try {
+      const canvas = gpuCanvasLike(12, 8);
+      const screen = surface(gpu, canvas, { autoResize: false, depth: true, format: "rgba8unorm", msaa: true });
+      const derived = target(gpu, { size: [12, 8], format: "rgba8unorm" });
+      const encodedColor = derived.color;
+      const publicResizes: Array<readonly [number, number]> = [];
+      screen.onResize(({ width, height }) => {
+        publicResizes.push([width, height]);
+        derived.resize([width, height]);
+      });
+      publicResizes.length = 0;
+      const blue = effect(gpu, `@fragment fn fs_main() -> @location(0) vec4f { return vec4f(0, 0, 1, 1); }`);
+      const yellow = effect(gpu, `@fragment fn fs_main() -> @location(0) vec4f { return vec4f(1, 1, 0, 1); }`);
+
+      frame(gpu, (current) => {
+        current.pass(derived, blue);
+        canvas.width = 16;
+        canvas.height = 10;
+        current.pass(screen, yellow);
+      });
+
+      expect(publicResizes).toEqual([]);
+      expect(derived.size).toEqual([12, 8]);
+      expect(derived.color).toBe(encodedColor);
+      expect(pixelAt(await encodedColor.read({ mipLevel: 0, region: "all" }), 12, 6, 4)).toEqual([0, 0, 255, 255]);
+      expect(screen.depth?.size).toEqual([16, 10]);
+      expect(pixelAt(await screen.color.read({ mipLevel: 0, region: "all" }), 16, 8, 5)).toEqual([255, 255, 0, 255]);
     } finally {
       gpu.dispose();
     }

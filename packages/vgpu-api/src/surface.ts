@@ -220,7 +220,7 @@ export class CanvasSurface implements Surface {
     this.#assertLive();
     const currentCanvasSize = sanitizeSize(canvasSize(this.canvas));
     if (!sameSize(this.#generationSize, currentCanvasSize)) {
-      this.#applyResize(currentCanvasSize, this.#currentDpr, true);
+      this.#applyResize(currentCanvasSize, this.#currentDpr, false);
     }
     const resolved = this.context.getCurrentTexture();
     return {
