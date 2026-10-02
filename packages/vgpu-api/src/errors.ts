@@ -574,6 +574,15 @@ export function clockDeltaInvalidError(received: unknown): VGPUError {
   });
 }
 
+export function asyncFrameCallbackError(where: "frame" | "frameLoop"): VGPUError {
+  return new VGPUError({
+    code: "VGPU-ASYNC-FRAME-CALLBACK",
+    message: `${where} callbacks must be synchronous.`,
+    where,
+    fix: "Await preparation before frame()/frameLoop(); keep the frame callback synchronous.",
+  });
+}
+
 export function frameReentrantError(): VGPUError {
   return new VGPUError({
     code: "VGPU-FRAME-REENTRANT",

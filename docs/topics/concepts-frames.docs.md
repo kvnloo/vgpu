@@ -17,7 +17,7 @@ order: 60
 
 # Frames
 
-A frame is one unit of GPU work. Inside it you open render passes with explicit targets and compute passes that dispatch prepared kernels. Everything is encoded into one command encoder, and vgpu submits it once when the callback returns.
+A frame is one unit of GPU work. Inside it you open render passes with explicit targets and compute passes that dispatch prepared kernels. Everything is encoded into one command encoder, and vgpu submits it once when the callback returns — which is why the callback is synchronous.
 
 ## Render a single frame
 
@@ -163,3 +163,56 @@ Use `f.computePass(pass => pass.dispatch(simulation, workgroups))` between rende
 Prepare pipelines with `await simulation.compile()` before opening a frame. Compute-pass callbacks are synchronous and cannot nest other passes. Cancellation discards both render and compute commands belonging to the frame.
 
 Direct draws and dispatches capture their current managed uniform values. Storage buffers stay live for GPU-to-GPU dataflow. Explicit host writes, raw resources and render bundles keep their existing buffer semantics; later host writes are not inserted between encoded commands.
+
+## Await before the frame, not inside it
+
+`frame(gpu, cb)` submits the moment the callback returns. An `async` callback returns its promise at the first `await`, so the frame would submit before the rest of the callback encoded anything. Do the asynchronous work — compiling pipelines, loading textures, fetching data — before you call `frame(gpu)` or register `frameLoop(gpu)`, keep the encoding synchronous, and tear down outside the callback. The loop from the previous sections, with its preparation and teardown spelled out:
+
+```ts
+import { init, compute, effect, frameLoop, storage, surface } from "vgpu";
+
+const gpu = await init();
+const canvas = document.querySelector("canvas")!;
+const canvasTarget = surface(gpu, canvas);
+const particles = storage(gpu, 64 * 16);
+const simulation = compute(gpu, `
+  @group(0) @binding(0) var<storage, read_write> particles: array<vec4f>;
+  @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3u) {
+    particles[id.x] += vec4f(0.0, -0.01, 0.0, 0.0);
+  }
+`, { set: { particles } });
+const shade = effect(gpu, `@fragment fn fs_main() -> @location(0) vec4f { return vec4f(0.1, 0.2, 0.4, 1.0); }`);
+
+// ---cut---
+await simulation.compile(); // async preparation, before the loop exists
+
+const handle = frameLoop(gpu, (currentFrame) => {
+  currentFrame.computePass((pass) => pass.dispatch(simulation, 1)); // encoding stays synchronous
+  currentFrame.pass(canvasTarget, shade);
+});
+
+export async function teardown(): Promise<void> {
+  handle.stop(); // async teardown runs outside any frame callback
+  await gpu.settled();
+  gpu.dispose();
+}
+```
+
+Synchronous block bodies, `void` expressions such as `(currentFrame) => currentFrame.pass(canvasTarget, shade)`, and helpers with a known non-Promise return type work — vgpu ignores the returned value. Existing synchronous helpers with those types need no rewrite.
+
+TypeScript rejects a callback whose inferred return type is a `Promise`, a `PromiseLike`, or a union containing one:
+
+```ts illustrative
+frame(gpu, async (currentFrame) => { // type error: the callback returns Promise<void>
+  await simulation.compile();
+  currentFrame.computePass((pass) => pass.dispatch(simulation, 1));
+});
+```
+
+The type check cannot see a return type that was already erased — a callback stored as `FrameLoopCallback`, `(frame: Frame) => unknown`, or `(frame: Frame) => any`, a cast, a generic wrapper, or plain JavaScript. For those, vgpu checks the result at runtime: an object or function with a callable `then` throws `VGPU-ASYNC-FRAME-CALLBACK` before the implicit submit, and the frame is canceled exactly as if the callback had thrown. vgpu observes the promise's rejection without reporting it to `gpu.onError` and never waits for it, so the error is synchronous even for a promise that never settles. In a loop, the offending tick throws with `where: "frameLoop"` and stops the loop like any throwing tick; registering the loop never runs the callback, so `frameLoop(gpu, cb)` itself does not throw.
+
+Cancellation still covers only the frame's own command buffer. A `frame.submit()` the callback already called stays on the queue, one-shot draws and dispatches have already submitted on their own, and CPU-side changes stay applied. The async continuation also keeps running; anything it tries to encode on the canceled frame throws `VGPU-FRAME-CANCELED`.
+
+> Warning: Do not hide async frame work behind `void`, a cast, or a wrapper that erases the return type. The runtime check stops the frame from submitting half-encoded, but it cannot make the continuation's work reach the GPU. Await first, then call `frame(gpu)`.
+
+Compute-pass callbacks keep their own check: a `computePass(...)` callback that returns a thenable throws `VGPU-COMPUTE-PASS-ASYNC`.
