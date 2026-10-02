@@ -294,7 +294,7 @@ export class CanvasSurface implements Surface {
   }
 
   #event(): SurfaceResizeEvent {
-    const size = this.#generationSize;
+    const size = canvasSize(this.canvas);
     return { width: size[0], height: size[1], dpr: this.#currentDpr, surface: this };
   }
 

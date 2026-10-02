@@ -196,6 +196,46 @@ test("an immediate onResize subscription cannot clear an outer texture-recreated
 test.each([
   { name: "default", attachments: {} },
   { name: "depth+MSAA", attachments: { depth: true, msaa: true } },
+] as const)("immediate onResize observes live external dimensions without reconciling a $name Surface", async ({ attachments }) => {
+  const gpu = await init();
+  try {
+    const canvas = canvasFixture(8, 6);
+    const createTexture = vi.spyOn(gpu.device, "createTexture");
+    const screen = surface(gpu, canvas.canvas, {
+      autoResize: false,
+      dpr: 1.5,
+      format: "rgba8unorm",
+      size: [8, 6],
+      ...attachments,
+    }) as CanvasSurface;
+    const oldDepth = screen.depth;
+    const recreated = vi.fn();
+    screen.onTexturesRecreated(recreated);
+    createTexture.mockClear();
+    canvas.canvas.width = 12;
+    canvas.canvas.height = 9;
+
+    const immediate: Array<readonly [number, number, number]> = [];
+    screen.onResize(({ width, height, dpr }) => immediate.push([width, height, dpr]));
+
+    expect(immediate).toEqual([[12, 9, 1.5]]);
+    expect(screen.size).toEqual([12, 9]);
+    expect(screen.depth).toBe(oldDepth);
+    expect(createTexture).not.toHaveBeenCalled();
+    expect(recreated).not.toHaveBeenCalled();
+    expect(canvas.getCurrentTexture).not.toHaveBeenCalled();
+    if (oldDepth) {
+      expect(oldDepth.size).toEqual([8, 6]);
+      expect(() => oldDepth.view).not.toThrow();
+    }
+  } finally {
+    gpu.dispose();
+  }
+});
+
+test.each([
+  { name: "default", attachments: {} },
+  { name: "depth+MSAA", attachments: { depth: true, msaa: true } },
 ] as const)("direct canvas drift stays silent after an earlier offscreen pass on a $name Surface", async ({ attachments }) => {
   const gpu = await init();
   try {
