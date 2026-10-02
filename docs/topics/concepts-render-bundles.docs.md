@@ -140,10 +140,10 @@ Some draws must stay on the dynamic side. Draws that set a `blendConstant` or a 
 
 ## Resizes and sampled targets
 
-A bundle matches replay targets by render signature, not size, so drawing onto a resized surface keeps working:
+A bundle matches replay targets by render signature, not size, so drawing onto a resized surface keeps working without recording again:
 
 ```ts
-import { init, bundle, clock, effect, frameLoop, surface } from "vgpu";
+import { init, bundle, effect, frameLoop, surface } from "vgpu";
 
 const gpu = await init();
 const canvas = document.querySelector("canvas")!;
@@ -155,17 +155,87 @@ const ocean = effect(gpu, `
 `);
 
 // ---cut---
-function recordScene() {
-  return bundle(gpu, { target: { colors: [canvasTarget.format] } }, (b) => b.draw(ocean));
-}
-
-let scene = recordScene();
-canvasTarget.onResize(() => { scene = recordScene(); }); // needed only if the bundle samples resized resources
+const scene = bundle(gpu, { target: { colors: [canvasTarget.format] } }, (b) => b.draw(ocean));
 
 frameLoop(gpu, (frame) => {
-  frame.pass(canvasTarget, (pass) => pass.bundles(scene));
+  frame.pass(canvasTarget, (pass) => pass.bundles(scene)); // still valid after every resize
 });
 ```
+
+Sampling is different. A bundle freezes its bind groups, so when a texture it samples is replaced — here, an offscreen target resized to follow the canvas — the bundle goes stale and replay throws `VGPU-R3-BUNDLE-STALE`. Record a replacement, swap it in, then dispose the old bundle:
+
+```ts
+import { init, bundle, effect, frameLoop, sampler, surface, target, type Bundle } from "vgpu";
+
+const gpu = await init();
+const canvas = document.querySelector("canvas")!;
+const canvasTarget = surface(gpu, canvas);
+const sceneTarget = target(gpu, { size: [canvasTarget.size[0], canvasTarget.size[1]] });
+const postEffect = effect(gpu, `
+  @group(0) @binding(0) var src: texture_2d<f32>;
+  @group(0) @binding(1) var samp: sampler;
+
+  @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
+    return vec4f(1.0 - textureSampleLevel(src, samp, uv, 0.0).rgb, 1.0);
+  }
+`);
+postEffect.set({ src: sceneTarget, samp: sampler(gpu, { minFilter: "linear", magFilter: "linear" }) });
+
+// ---cut---
+let post: Bundle | undefined;
+
+canvasTarget.onResize(({ width, height }) => {
+  sceneTarget.resize([width, height]); // new textures: the bundle sampling the old ones is stale
+  const next = bundle(gpu, { target: { colors: [canvasTarget.format] } }, (b) => b.draw(postEffect));
+  const previous = post;
+  post = next; // swap only after recording succeeded
+  previous?.dispose(); // then release the replaced bundle
+}); // fires once immediately, so this also records the first bundle
+
+frameLoop(gpu, (frame) => {
+  frame.pass(canvasTarget, (pass) => pass.bundles(post!));
+});
+```
+
+The order matters. If recording throws, `post` still holds the previous bundle and nothing was disposed early. Re-record only for changes like this one, never solely because the destination resized.
+
+## Release bundles you no longer need
+
+You do not have to release a bundle. The draws and resources a bundle recorded do not keep it alive, so once your code drops its last reference, the bundle is collected eventually like any other object. vgpu makes no promise about when that happens or when the driver frees the native bundle's memory.
+
+Call `dispose()` when you want vgpu's references and registrations released at a known point — replacing a bundle, or tearing down a view. Neither garbage collection nor `dispose()` promises when native WebGPU or the driver reclaims memory:
+
+```ts
+import { init, bundle, effect, frame, target } from "vgpu";
+
+const gpu = await init();
+const sceneTarget = target(gpu, { size: [256, 256] });
+const ocean = effect(gpu, `
+  @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
+    return vec4f(0.1, 0.3, 0.6, 1.0);
+  }
+`);
+
+// ---cut---
+const scene = bundle(gpu, { target: sceneTarget, label: "ocean" }, (b) => b.draw(ocean));
+
+frame(gpu, (currentFrame) => {
+  currentFrame.pass(sceneTarget, (pass) => pass.bundles(scene));
+  scene.dispose(); // the replay is already encoded — this frame still submits it
+});
+
+scene.dispose(); // idempotent: a second call does nothing
+console.log(scene.id); // "ocean" — the id stays readable
+ocean.draw(sceneTarget); // the effect was borrowed, not destroyed
+```
+
+`dispose()` is synchronous. It unregisters the bundle from the draws and resources it watched and drops its captured draws and native handle reference. It never destroys what the bundle borrowed — draws, effects, geometry, textures, buffers, and targets stay yours.
+
+> Warning: After `dispose()`, reading `scene.gpu` or replaying the bundle throws `VGPU-BUNDLE-DISPOSED`. Record a new bundle before replaying. In `pass.bundles(a, b)`, one disposed entry means none of the list replays.
+
+Disposal cannot reach what already left the bundle. Work encoded before `dispose()` still runs, and a `GPURenderBundle` you read from `scene.gpu` earlier stays usable for as long as native WebGPU keeps it valid — vgpu cannot revoke it, and it no longer checks that handle for staleness.
+
+A bundle that goes permanently stale — a captured resource was rebound or destroyed — detaches from its draws and resources on its own, and replay keeps reporting the first cause. A replay on a target with a different signature is not permanent: it throws `VGPU-R3-BUNDLE-STALE` for that call only, and replaying on a matching target afterwards works.
 
 ## When not to bother
 
