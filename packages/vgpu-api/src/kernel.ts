@@ -45,6 +45,7 @@ export type EntryKind = "browser" | "node" | "mock";
 export interface Gpu {
   readonly device: Device;
   readonly gpu: GPUDevice;
+  readonly lost: Promise<GPUDeviceLostInfo>;
   /** True once `dispose()` ran. Reads stay legal; new work does not. */
   readonly disposed: boolean;
   onError(cb: GpuErrorListener): () => void;
@@ -88,6 +89,7 @@ export function serviceToken<T>(name: string): ServiceToken<T> {
 export interface Kernel {
   readonly device: Device;
   readonly disposed: boolean;
+  readonly lost: Promise<GPUDeviceLostInfo>;
   /**
    * Lazily creates (and memoizes) the service behind `token`. The factory lives in the calling
    * feature module, so the kernel never references it statically.
@@ -97,6 +99,8 @@ export interface Kernel {
   peekService<T>(token: ServiceToken<T>): T | undefined;
   /** Registers a teardown callback in `phase`; returns the release that unregisters it. */
   own(phase: OwnershipPhase, disposer: Disposer): Release;
+  /** Registers a loop stop that runs on observed native loss without running scheduler teardown. */
+  stopOnLoss(stop: Disposer): Release;
   addErrorListener(cb: GpuErrorListener): Release;
   /** Delivers asynchronously to the listeners (or `console.error`). Never rejects, never throws. */
   reportError(error: VGPUError): Promise<void>;
@@ -129,9 +133,29 @@ class KernelImpl implements Kernel {
   readonly #errorListeners = new Set<GpuErrorListener>();
   readonly #pendingDeliveries = new Set<Promise<void>>();
   readonly #settledSources = new Set<SettledSource>();
+  readonly #lossStops = new Set<Disposer>();
+  readonly #releaseDeviceLoss: Release;
+  readonly #resolveLost: (info: GPUDeviceLostInfo) => void;
+  readonly lost: Promise<GPUDeviceLostInfo>;
   #disposed = false;
+  #lossInfo: GPUDeviceLostInfo | undefined;
 
-  constructor(readonly device: Device) {}
+  constructor(readonly device: Device) {
+    let resolveLost!: (info: GPUDeviceLostInfo) => void;
+    this.lost = new Promise<GPUDeviceLostInfo>((resolve) => { resolveLost = resolve; });
+    this.#resolveLost = resolveLost;
+    this.#releaseDeviceLoss = onObservedDeviceLoss(device, (info) => {
+      if (this.#disposed || this.#lossInfo) return;
+      this.#lossInfo = info;
+      const stops = [...this.#lossStops];
+      this.#lossStops.clear();
+      for (const stop of stops) {
+        try { stop(); }
+        catch { /* one broken loop stop must not block the others or reject gpu.lost */ }
+      }
+      this.#resolveLost(info);
+    });
+  }
 
   get disposed(): boolean { return this.#disposed; }
 
@@ -151,6 +175,15 @@ class KernelImpl implements Kernel {
     const set = this.#owners.get(phase)!;
     set.add(disposer);
     return () => { set.delete(disposer); };
+  }
+
+  stopOnLoss(stop: Disposer): Release {
+    if (this.#lossInfo || this.#disposed) {
+      stop();
+      return () => undefined;
+    }
+    this.#lossStops.add(stop);
+    return () => { this.#lossStops.delete(stop); };
   }
 
   addErrorListener(cb: GpuErrorListener): Release {
@@ -205,6 +238,7 @@ class KernelImpl implements Kernel {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#releaseDeviceLoss();
     for (const phase of PHASES) {
       const set = this.#owners.get(phase)!;
       // Copy: a disposer usually calls its own release(), mutating the set while we walk it.
@@ -213,6 +247,7 @@ class KernelImpl implements Kernel {
     }
     this.#services.clear();
     this.#settledSources.clear();
+    this.#lossStops.clear();
     this.#errorListeners.clear();
     this.device.dispose();
   }
@@ -224,6 +259,7 @@ export function attachKernel(device: Device): Gpu {
   const gpu: Gpu = {
     device,
     gpu: device.gpu,
+    lost: kernel.lost,
     get disposed(): boolean { return kernel.disposed; },
     onError: (cb: GpuErrorListener) => kernel.addErrorListener(cb),
     settled: () => kernel.settled(),
@@ -231,6 +267,12 @@ export function attachKernel(device: Device): Gpu {
   };
   kernels.set(gpu, kernel);
   return gpu;
+}
+
+function onObservedDeviceLoss(device: Device, observer: (info: GPUDeviceLostInfo) => void): Release {
+  return (device as unknown as {
+    onObservedLoss(observer: (info: GPUDeviceLostInfo) => void): Release;
+  }).onObservedLoss(observer);
 }
 
 /** Entry-agnostic core constructor: resolve a device, wrap it in the minimal `Gpu`. */
