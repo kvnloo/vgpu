@@ -5,7 +5,7 @@
 
 ## Summary
 
-`Gpu` now exposes `readonly lost: Promise<GPUDeviceLostInfo>`, a loss-only notification. The promise keeps one identity, never rejects, and resolves once with the native `GPUDeviceLostInfo` when vgpu observes native device loss while the gpu is active. vgpu stops every running `frameLoop` before `gpu.lost` handlers run, so no tick runs or throws after the loss. Loss does not dispose the gpu, destroy its resources, deliver anything to `gpu.onError`, or recover the device: create a new `Gpu` with `init()`, recreate its resources, and restart the loop.
+`Gpu` now exposes `readonly lost: Promise<GPUDeviceLostInfo>`, a loss-only notification. The promise keeps one identity, never rejects, and resolves once with the native `GPUDeviceLostInfo` when vgpu observes native device loss while the gpu is active. vgpu stops every running `frameLoop` before `gpu.lost` handlers run, so no tick runs or throws after vgpu observes the loss. Loss does not dispose the gpu, destroy its resources, deliver anything to `gpu.onError`, or recover the device: create a new `Gpu` with `init()`, recreate its resources, and restart the loop.
 
 `gpu.dispose()` remains your own teardown, not a loss. Disposing before vgpu observes a loss leaves `gpu.lost` pending; disposing after keeps its resolved value; disposing a gpu from `initFromDevice(device)` still never destroys the borrowed device. A borrowed device destroyed by its owner while the wrapper is active counts as a loss, with `reason: "destroyed"`. `gpu.settled()` never waits for `gpu.lost`.
 
