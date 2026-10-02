@@ -78,7 +78,12 @@ function frameRunner(kernel: Kernel): FrameRunner {
         return frame;
       },
       () => state.tick(),
-      (handle) => self.own("scheduler", () => handle.stop()),
+      (handle) => {
+        const releaseScheduler = self.own("scheduler", () => handle.stop());
+        const releaseLoss = self.stopOnLoss(() => handle.stop());
+        return () => { releaseScheduler(); releaseLoss(); };
+      },
+      (where) => assertDeviceUsable(self.device, where),
     );
   });
 }
@@ -631,12 +636,6 @@ function previewValue(value: unknown): string {
   return String(value);
 }
 
-/** True for the "the device this frame belongs to is gone" errors raised by the liveness guards. */
-function isDeviceGoneError(error: unknown): boolean {
-  const code = (error as VGPUError | undefined)?.code;
-  return code === "VGPU-DEVICE-DISPOSED" || code === "VGPU-DEVICE-LOST";
-}
-
 function isThenable(value: unknown): value is PromiseLike<unknown> {
   return value !== null
     && (typeof value === "object" || typeof value === "function")
@@ -650,7 +649,12 @@ export class FrameRunner {
    * returns the untrack function the handle runs when it stops on its own, so `gpu.dispose()` can
    * stop the loops still running without holding on to the ones already stopped.
    */
-  constructor(private readonly createFrame: () => Frame, private readonly advance: () => void, private readonly trackLoop?: (handle: FrameLoopHandle) => () => void) {}
+  constructor(
+    private readonly createFrame: () => Frame,
+    private readonly advance: () => void,
+    private readonly trackLoop?: (handle: FrameLoopHandle) => () => void,
+    private readonly assertActive?: (where: "frame" | "frameLoop") => void,
+  ) {}
   frame(): Frame;
   frame<R>(cb: SyncFrameCallback<R> | undefined): Frame;
   frame<R>(cb?: SyncFrameCallback<R>): Frame {
@@ -658,6 +662,7 @@ export class FrameRunner {
   }
   #runFrame<R>(cb: SyncFrameCallback<R> | undefined, where: "frame" | "frameLoop"): Frame {
     if (this.#running || isSurfaceResizeCallbackActive()) throw frameReentrantError();
+    this.assertActive?.(where);
     this.#running = true;
     enterFrame();
     try {
@@ -685,13 +690,11 @@ export class FrameRunner {
           }
           throw error;
         }
-        // A callback is allowed to dispose the owning gpu (gpu.dispose() inside a loop tick does
-        // exactly that). dispose() cancels the open frame, so this submit is a no-op; if the device
-        // was lost instead, the frame has nothing left to flush either, so the implicit submit
-        // swallows that one error rather than throwing over the callback's own intent. An explicit
-        // frame.submit() on a dead device still reports it.
-        try { frame.submit(); }
-        catch (error) { if (!isDeviceGoneError(error)) throw error; }
+        // A callback may dispose the owning gpu (including from inside a loop tick). dispose()
+        // cancels the open frame, so this submit is already a no-op. Observed native loss stops
+        // loops before their public notification and is refused by the entry guard above; every
+        // other submit failure, including a user error with a similar shape, must still escape.
+        frame.submit();
       }
       return frame;
     } finally {
