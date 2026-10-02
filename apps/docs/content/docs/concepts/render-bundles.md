@@ -192,7 +192,7 @@ The order matters. If recording throws, `post` still holds the previous bundle a
 
 You do not have to release a bundle. The draws and resources a bundle recorded do not keep it alive, so once your code drops its last reference, the bundle is collected eventually like any other object. vgpu makes no promise about when that happens or when the driver frees the native bundle's memory.
 
-Call `dispose()` when you want the release to happen at a known point — replacing a bundle, or tearing down a view:
+Call `dispose()` when you want vgpu's references and registrations released at a known point — replacing a bundle, or tearing down a view. Neither garbage collection nor `dispose()` promises when native WebGPU or the driver reclaims memory:
 
 ```ts
 import { init, bundle, effect, frame, target } from "vgpu";

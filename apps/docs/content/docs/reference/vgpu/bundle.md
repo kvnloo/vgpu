@@ -188,7 +188,7 @@ For future canvas surfaces, use `navigator.gpu.getPreferredCanvasFormat()` when 
 
 A bundle holds its recorded draws; the draws and the resources they bind do not hold the bundle. When your code drops its last reference to a bundle, the bundle becomes unreachable and is collected eventually, like any JavaScript object. vgpu makes no promise about when collection happens or when the driver reclaims the native bundle's memory.
 
-`dispose()` releases the bundle at a point you choose. It is synchronous and idempotent: it unregisters the bundle from the draws and resources it watched, drops its captured draws, and drops its reference to the native render bundle. It never destroys borrowed resources — the draws, effects, geometry, textures, buffers, samplers, and targets stay yours. After disposal, `id` stays readable, and reading `gpu` or replaying the bundle throws `VGPU-BUNDLE-DISPOSED`.
+`dispose()` releases vgpu's references and registrations at a point you choose. It is synchronous and idempotent: it unregisters the bundle from the draws and resources it watched, drops its captured draws, and drops its reference to the native render bundle. It never destroys borrowed resources — the draws, effects, geometry, textures, buffers, samplers, and targets stay yours. After disposal, `id` stays readable, and reading `gpu` or replaying the bundle throws `VGPU-BUNDLE-DISPOSED`. Neither garbage collection nor `dispose()` promises when native WebGPU or the driver reclaims memory.
 
 Disposal cannot reach work or handles that already left the facade. A frame that replayed the bundle before `dispose()` still submits it. A `GPURenderBundle` you read from `bundle.gpu` before disposal stays usable for as long as native WebGPU keeps it valid; vgpu cannot revoke it and no longer checks it for staleness.
 
@@ -202,7 +202,7 @@ A bundle that becomes permanently stale — a captured resource was rebound or d
 - `surface.onResize(...)` fires immediately, so the same re-recording callback can initialize and refresh bundles that sample resized resources.
 - Bundles freeze bind group identities, not buffer contents. Updating JS-owned packed values in-place is safe, and `set()` uniform updates keep reaching every live bundle that recorded the draw, including native handles read from `bundle.gpu`. Rebinding a different texture/buffer/sampler stales the bundle.
 - Do not record against a `Surface` object outside a frame; it throws `VGPU-SURFACE-NOT-IN-FRAME`. Pass `{ colors: [canvasSurface.format] }` instead.
-- Do not rely on garbage collection to free GPU memory on a schedule. Call `dispose()` when you replace or tear down bundles and want the release to happen at that point.
+- Neither garbage collection nor `dispose()` frees GPU or driver memory on a schedule. Call `dispose()` when you replace or tear down bundles and want vgpu's references and registrations released synchronously.
 - Draws with `blendConstant` cannot be recorded: render bundle encoders have no way to set the pass blend constant. Recording throws `VGPU-BUNDLE-BLEND-CONSTANT`; use `FramePass.draw` for those draws.
 - Draws whose `stencil` has `ref` cannot be recorded either: render bundle encoders have no way to set the pass stencil reference. Recording throws `VGPU-BUNDLE-STENCIL-REF`; stencil pipeline state without `ref` records fine.
 - **See also:** `FramePass.bundles`, `Draw`, `Effect`, `Surface`, `Target`, `createRenderBundle`.
