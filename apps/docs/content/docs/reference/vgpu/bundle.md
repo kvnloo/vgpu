@@ -35,7 +35,7 @@ interface Bundle {
 | Param | Type | Required | Default | Notes |
 |---|---|---:|---|---|
 | bundle.opts | `BundleOptions` | ✔ | — | Recording options. |
-| opts.target | `Target \| TargetSignature` | ✔ | — | Formats, depth format, and sample count are recorded. Signature form is `{ colors: [...], depth?, sampleCount? }`; `colors` is required. A live `Surface` is accepted inside or outside a frame: recording reads its configured signature — `format`, no depth attachment, sample count 1 — without acquiring a canvas texture. Before the surface exists, pass a signature such as `{ colors: [navigator.gpu.getPreferredCanvasFormat()] }`. |
+| opts.target | `Target \| TargetSignature` | ✔ | — | Formats, depth format, and sample count are recorded. Signature form is `{ colors: [...], depth?, sampleCount? }`; `colors` is required. A live `Surface` is accepted inside or outside a frame: recording reads its configured `format`, resolved depth format, and sample count without acquiring a canvas texture. Before the surface exists, `{ colors: [navigator.gpu.getPreferredCanvasFormat()] }` describes its defaults; include matching `depth` and `sampleCount` when planning depth or MSAA. |
 | opts.label | `string` | ✖ | `` `bundle${n}` `` | Bundle id and GPU label. Auto id increments from `bundle1`. |
 | bundle.cb | `(recorder: BundleRecorder) => void` | ✔ | — | Called immediately to encode commands. |
 | recorder.draw.drawable | `Draw \| Effect` | ✔ | — | Draw or fullscreen effect to encode into the bundle. |

@@ -66,9 +66,32 @@ frameLoop(gpu, (currentFrame) => {
 });
 ```
 
-`compile(canvasSurface)` reads the surface's configured render signature — its `format`, including an explicit `surface(..., { format })` override, with no depth attachment and a sample count of 1. It does not acquire the current canvas texture, read or allocate attachments, resize the canvas, notify `onResize` listeners, or submit work. `compileSync(canvasSurface)` and `draw(gpu, { targets: [canvasSurface] })` prepare the same pipeline synchronously.
+`compile(canvasSurface)` reads the surface's configured render signature — its `format`, including an explicit `surface(..., { format })` override, plus the depth format and sample count it was created with. A plain `surface(gpu, canvas)` has no depth attachment and a sample count of 1. It does not acquire the current canvas texture, read or allocate attachments, resize the canvas, notify `onResize` listeners, or submit work. `compileSync(canvasSurface)` and `draw(gpu, { targets: [canvasSurface] })` prepare the same pipeline synchronously.
 
-The signature excludes size, so resizing the surface keeps every pipeline compiled for it. Compiling against the surface or against the equivalent `{ colors: [canvasSurface.format] }` warms the same cached pipeline.
+A surface created with `depth` or `msaa` reports those in its signature, so the same call warms the exact pipeline its passes need:
+
+```ts
+import { init, effect, frameLoop, surface } from "vgpu";
+
+const gpu = await init();
+const canvas = document.querySelector("canvas")!;
+const ocean = effect(gpu, `
+  @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
+    return vec4f(uv, 0.8, 1.0);
+  }
+`);
+
+// ---cut---
+const sceneSurface = surface(gpu, canvas, { depth: true, msaa: true });
+
+await ocean.compile(sceneSurface); // warms format + "depth24plus" + 4 samples
+
+frameLoop(gpu, (currentFrame) => {
+  currentFrame.pass(sceneSurface, ocean);
+});
+```
+
+Prefer `compile(surface)` once the surface exists: it cannot drift from the surface's real depth format and sample count. The signature excludes size, so resizing the surface keeps every pipeline compiled for it. Compiling against the surface or against the equivalent signature — `{ colors: [canvasSurface.format] }` for a plain surface, `{ colors: [sceneSurface.format], depth: "depth24plus", sampleCount: 4 }` for the one above — warms the same cached pipeline.
 
 > Warning: Preparation is not drawing. A one-shot `ocean.draw(canvasSurface)` outside a frame still throws `VGPU-SURFACE-NOT-IN-FRAME`; encode surface draws inside `frame(gpu, ...)` or `frameLoop(gpu, ...)`. Compiling against a disposed surface throws `VGPU-SURFACE-DISPOSED` — create a live surface first.
 
@@ -98,7 +121,7 @@ frame(gpu, (frame) => frame.pass(canvasSurface, ocean));
 
 Once the surface exists, pass it directly — `await ocean.compile(canvasSurface)` — as in the previous section. Use a signature only when you prepare before the surface is created.
 
-The signature must match the actual target's color formats, depth format, and sample count. A canvas surface has no depth attachment and a sample count of 1, so the example omits both optional fields. For offscreen targets, use their configured formats and include depth/MSAA when enabled, or pass the existing target directly to `compile()`.
+The signature must match the actual target's color formats, depth format, and sample count. The surface in this example is created without `depth` or `msaa`, so it has no depth attachment and a sample count of 1, and the signature omits both optional fields. For a surface created with `{ depth: true, msaa: true }`, add `depth: "depth24plus", sampleCount: 4`. For offscreen targets, use their configured formats and include depth/MSAA when enabled, or pass the existing target or surface directly to `compile()`.
 
 > Good to know: `getPreferredCanvasFormat()` returns the system's preferred `rgba8unorm` or `bgra8unorm` canvas texture format. Compiling a different valid signature can succeed, but it doesn't warm the pipeline needed by the actual target: the first render still compiles that pipeline lazily.
 
