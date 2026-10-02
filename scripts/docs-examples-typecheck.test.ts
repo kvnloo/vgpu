@@ -96,7 +96,7 @@ function sourceOnlyGitFailure(error: unknown): boolean {
     || /not a git repository|not a git work tree/i.test(output);
 }
 
-function gitTrackedExampleSources(runGit: RunGit): string[] | undefined {
+function gitExampleSources(runGit: RunGit): string[] | undefined {
   let topLevel: string;
   try {
     topLevel = resolve(runGit(["rev-parse", "--show-toplevel"]).trim());
@@ -107,11 +107,26 @@ function gitTrackedExampleSources(runGit: RunGit): string[] | undefined {
 
   if (topLevel !== repoRoot) return undefined;
 
-  const output = runGit(["ls-files", "-z", "--", "apps/docs/examples"]);
+  const output = runGit([
+    "ls-files",
+    "-z",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+    "--",
+    "apps/docs/examples",
+  ]);
+  const deleted = new Set(runGit([
+    "ls-files",
+    "-z",
+    "--deleted",
+    "--",
+    "apps/docs/examples",
+  ]).split("\0"));
   return normalized(
     output
       .split("\0")
-      .filter((file) => exampleSourcePattern.test(file))
+      .filter((file) => exampleSourcePattern.test(file) && !deleted.has(file))
       .map((file) => resolve(repoRoot, file)),
   );
 }
@@ -137,8 +152,8 @@ function exampleSourceInventory(
   root = examplesRoot,
   runGit: RunGit = defaultRunGit,
 ): ExampleSourceInventory {
-  const tracked = gitTrackedExampleSources(runGit);
-  if (tracked !== undefined) return { files: tracked, kind: "git" };
+  const gitSources = gitExampleSources(runGit);
+  if (gitSources !== undefined) return { files: gitSources, kind: "git" };
   return { files: filesystemExampleSources(root), kind: "filesystem" };
 }
 
@@ -298,6 +313,53 @@ test("coverage control rejects a missing MTS include and TypeScript brace glob",
   expect(() => assertCompleteExampleCoverage(withBraceGlob)).toThrow(
     /glass-fractal\/renderer\.test\.ts/,
   );
+});
+
+test("Git inventory includes new sources and excludes deleted indexed sources", () => {
+  const tracked = "apps/docs/examples/inventory-control/tracked.ts";
+  const untracked = "apps/docs/examples/inventory-control/new-tool.mts";
+  const deleted = "apps/docs/examples/inventory-control/deleted.tsx";
+  const runGit: RunGit = (args) => {
+    if (args.join(" ") === "rev-parse --show-toplevel") return repoRoot;
+    if (args.join(" ") === [
+      "ls-files",
+      "-z",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      "--",
+      "apps/docs/examples",
+    ].join(" ")) {
+      return `${tracked}\0${untracked}\0${deleted}\0`;
+    }
+    if (args.join(" ") === [
+      "ls-files",
+      "-z",
+      "--deleted",
+      "--",
+      "apps/docs/examples",
+    ].join(" ")) {
+      return `${deleted}\0`;
+    }
+    throw new Error(`Unexpected Git command: git ${args.join(" ")}`);
+  };
+
+  const inventory = exampleSourceInventory(examplesRoot, runGit);
+  const expected = normalized([
+    resolve(repoRoot, tracked),
+    resolve(repoRoot, untracked),
+  ]);
+
+  expect(inventory).toEqual({ files: expected, kind: "git" });
+  expect(() => assertExampleSourceCoverage(expected, inventory.files)).not.toThrow();
+  expect(() => assertExampleSourceCoverage(
+    [resolve(repoRoot, tracked)],
+    inventory.files,
+  )).toThrow(/new-tool\.mts/);
+  expect(() => assertExampleSourceCoverage(
+    [...expected, resolve(repoRoot, deleted)],
+    inventory.files,
+  )).toThrow(/deleted\.tsx/);
 });
 
 test("source-only inventory retains coverage without Git metadata or executable", () => {
