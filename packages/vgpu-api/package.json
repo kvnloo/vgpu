@@ -118,7 +118,7 @@
     "./three": "client"
   },
   "vgpuExportBundleBudgetsGzipBytes": {
-    ".": 45568,
+    ".": 46080,
     "./node": 45568,
     "./mock": 45056,
     "./scene": 19456,

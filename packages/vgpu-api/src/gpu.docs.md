@@ -33,8 +33,15 @@ declare function effect(gpu: Gpu, source: string | ShaderSource, opts?: EffectOp
 declare function draw(gpu: Gpu, opts: DrawOptions): Draw;
 declare function target(gpu: Gpu, opts: TargetOptions): Target;
 declare function texture(gpu: Gpu, opts: TextureOptions): Texture;
-declare function frame(gpu: Gpu, cb?: (frame: Frame) => void): Frame;
-declare function frameLoop(gpu: Gpu, cb: (frame: Frame) => void, opts?: FrameLoopOptions): FrameLoopHandle;
+// Private inference guard (not exported): rejects callbacks whose inferred return contains a Promise/PromiseLike.
+type IsAny<T> = 0 extends (1 & T) ? true : false;
+type SyncFrameCallback<R> = ((frame: Frame) => R)
+  & (IsAny<R> extends true
+    ? unknown
+    : [Extract<R, PromiseLike<unknown>>] extends [never] ? unknown : never);
+declare function frame(gpu: Gpu): Frame;
+declare function frame<R>(gpu: Gpu, cb: SyncFrameCallback<R> | undefined): Frame;
+declare function frameLoop<R>(gpu: Gpu, cb: SyncFrameCallback<R>, opts?: FrameLoopOptions): FrameLoopHandle;
 declare function sampler(gpu: Gpu, desc?: GPUSamplerDescriptor): GPUSampler;
 declare function geometry(gpu: Gpu, input: GeometryOptions | GeometryRecipe): Geometry;
 declare function compute(gpu: Gpu, source: string | ShaderSource, opts?: ComputeOptions): Compute;
@@ -61,7 +68,9 @@ declare function clock(gpu: Gpu): Clock;
 | draw.opts | `DrawOptions` | ✔ | — | Includes required `shader`; see `DrawOptions`. |
 | target.opts | `TargetOptions` | ✔ | — | Offscreen target options. `size` is required. |
 | texture.opts | `TextureOptions` | ✔ | — | Standalone sampled/storage texture. `size` and `format` are required; usage defaults to sampled, storage, and copy usage. |
-| frame.cb | `(frame: Frame) => void` | ✖ | `undefined` | If provided, submits when the callback returns and cancels (submits nothing) when it throws; if omitted, caller must call `frame.submit()` or `frame.cancel()`. |
+| frame.cb | `SyncFrameCallback<R> \| undefined` — a synchronous `(frame: Frame) => R` | ✖ | `undefined` | If provided, submits when the callback returns a non-thenable result and cancels (submits nothing) when it throws or returns a thenable (`VGPU-ASYNC-FRAME-CALLBACK`). Inferred `Promise`/`PromiseLike` returns fail to typecheck. If omitted — `frame(gpu)` or `frame(gpu, undefined)` — caller must call `frame.submit()` or `frame.cancel()`. See `Frame`. |
+| frameLoop.cb | `SyncFrameCallback<R>` — a synchronous `(frame: Frame) => R` | ✔ | — | Runs once per animation frame with the `frame.cb` rule; a tick that throws or returns a thenable stops the loop. Registration does not run the callback. See `Frame`. |
+| frameLoop.opts | `FrameLoopOptions` | ✖ | `{}` | `fps` caps the tick rate; omitted runs every animation frame. |
 | sampler.desc | `GPUSamplerDescriptor` | ✖ | `undefined` | Cached by descriptor. `sampler(gpu)` is the canonical default sampler. |
 | geometry.input | `GeometryOptions \\| GeometryRecipe` | ✔ | — | A raw buffer descriptor, or a `vgpu/scene` recipe such as `box()` or `plane()`. |
 | compute.source | `string \| ShaderSource` | ✔ | — | WGSL string or `ShaderSource`. Must contain a `@compute` entry point. |
@@ -80,9 +89,9 @@ declare function clock(gpu: Gpu): Clock;
 | onError.cb | `GpuErrorListener` | ✔ | — | Receives asynchronous vgpu errors; returns an unsubscribe function. |
 | clock | — | — | — | No parameters. The frame clock of this gpu: `{ time, deltaTime, frameCount, advance(dtSeconds) }`, one instance per gpu. See `Clock`. |
 
-**Returns:** each factory returns the resource named in its signature. `dispose()` and frame/pass callbacks return `void`. `onError(cb)` returns its unsubscribe function. `settled()` returns a `Promise<void>` that always fulfills — see "Wait for submitted work" below.
+**Returns:** each factory returns the resource named in its signature. `dispose()` returns `void`. Frame callbacks are synchronous: a non-thenable return value is ignored. `onError(cb)` returns its unsubscribe function. `settled()` returns a `Promise<void>` that always fulfills — see "Wait for submitted work" below.
 
-**Throws:** `VGPU-GPU-DISPOSED` when any factory (or `clock(gpu)`) runs after `gpu.dispose()` — the device and everything it owned are gone, so the handle it would return could only fail later; create resources before disposing, or `init()` a new gpu; `VGPU-GPU-FOREIGN` when the first argument was not created by `init()` (a plain object, a `GPUDevice`, a gpu from another library): it carries no vgpu kernel, so pass the object returned by `init()` from `vgpu`, `vgpu/node` or `vgpu/mock`; `VGPU-LIMIT-STORAGE-VERTEX` / `VGPU-LIMIT-STORAGE-FRAGMENT` when a selected render entry exceeds its granted storage-buffer limit. The structured detail reports `stage`, `entryPoint`, `count`, `limit`, and each counted binding's `name`, `group`, and `binding`; request a supported limit or reduce/move the data; `VGPU-SHADER-SOURCE-INVALID` for malformed `ShaderSource`; `VGPU-SET-VALUE-INVALID` when a JS-owned buffer value does not exactly match its reflected WGSL shape, integer range, or runtime extent; `VGPU-SET-TEXTURE-FILTERABILITY` when a known facade texture format cannot satisfy an ordinarily sampled float binding (detail reports format, texture binding/name/label, and paired sampler identity); `VGPU-RING1-UNSUPPORTED` for unsupported effect/compute/target cases; `VGPU-TARGET-REQUIRED` when one-shot drawing needs an explicit target; `VGPU-TARGET-SIZE-REQUIRED` for runtime JS calls to `target(gpu)` without `size`; `VGPU-SURFACE-*` errors from `surface()`, surface resize, surface readback, or using disposed surfaces; plus method-specific `VGPU-R1-*`, `VGPU-R3-*`, and `VGPU-R4-*` errors documented on `Effect`, `Draw`, `Compute`, `Frame`, `Bundle`, `Target`, and `SharedUniforms`.
+**Throws:** `VGPU-GPU-DISPOSED` when any factory (or `clock(gpu)`) runs after `gpu.dispose()` — the device and everything it owned are gone, so the handle it would return could only fail later; create resources before disposing, or `init()` a new gpu; `VGPU-GPU-FOREIGN` when the first argument was not created by `init()` (a plain object, a `GPUDevice`, a gpu from another library): it carries no vgpu kernel, so pass the object returned by `init()` from `vgpu`, `vgpu/node` or `vgpu/mock`; `VGPU-LIMIT-STORAGE-VERTEX` / `VGPU-LIMIT-STORAGE-FRAGMENT` when a selected render entry exceeds its granted storage-buffer limit. The structured detail reports `stage`, `entryPoint`, `count`, `limit`, and each counted binding's `name`, `group`, and `binding`; request a supported limit or reduce/move the data; `VGPU-SHADER-SOURCE-INVALID` for malformed `ShaderSource`; `VGPU-SET-VALUE-INVALID` when a JS-owned buffer value does not exactly match its reflected WGSL shape, integer range, or runtime extent; `VGPU-SET-TEXTURE-FILTERABILITY` when a known facade texture format cannot satisfy an ordinarily sampled float binding (detail reports format, texture binding/name/label, and paired sampler identity); `VGPU-RING1-UNSUPPORTED` for unsupported effect/compute/target cases; `VGPU-TARGET-REQUIRED` when one-shot drawing needs an explicit target; `VGPU-TARGET-SIZE-REQUIRED` for runtime JS calls to `target(gpu)` without `size`; `VGPU-SURFACE-*` errors from `surface()`, surface resize, surface readback, or using disposed surfaces; `VGPU-ASYNC-FRAME-CALLBACK` when a `frame(gpu, cb)` / `frameLoop(gpu, cb)` callback returns a thenable — the open frame is canceled before its implicit submit, so await preparation before `frame()`/`frameLoop()` and keep the frame callback synchronous; plus method-specific `VGPU-R1-*`, `VGPU-R3-*`, and `VGPU-R4-*` errors documented on `Effect`, `Draw`, `Compute`, `Frame`, `Bundle`, `Target`, and `SharedUniforms`.
 
 ## Examples
 
@@ -216,6 +225,7 @@ gpu.dispose();
 - There is no implicit screen property and no implicit default target. Pass `target` explicitly to frame passes and one-shot draws.
 - Canvas-specific `size`, `dpr`, and `autoResize` live on `surface(gpu, canvas, opts)`, not on `init()`.
 - Time is explicit JS state, and it lives on the clock, not on the context: read `clock(gpu).time` / `.deltaTime` / `.frameCount` and pass them through `set()` or `SharedUniforms` when shaders need them.
+- Await asynchronous setup — `await init()`, `await simulation.compile()` on a `Compute`, asset loading — before `frame(gpu, cb)` or `frameLoop(gpu, cb)`, and run async teardown such as `await gpu.settled()` after the frame returns or the loop is stopped. The frame callback itself stays synchronous.
 - Every factory rejects a disposed gpu with `VGPU-GPU-DISPOSED`, and an object vgpu did not create with `VGPU-GPU-FOREIGN`. Both are thrown synchronously, from the call that made the mistake.
 - **See also:** `init`, `Clock`, `Surface`, `Effect`, `Draw`, `Compute`, `Frame`, `Target`, `Bundle`, `SharedUniforms`, `Timer`, `Visibility`.
 
