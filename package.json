@@ -54,7 +54,7 @@
     "pixelmatch": "^7.2.0",
     "pngjs": "^7.0.0",
     "portless": "0.13.0",
-    "subharness": "0.0.5",
+    "subharness": "0.0.7",
     "typescript": "^5.7.3",
     "vgpu": "workspace:*",
     "vitest": "^4.1.11",

@@ -40,6 +40,7 @@ import { meta as springChoreographyMeta } from '../examples/spring-choreography/
 import { meta as modularCityMeta } from '../examples/modular-city/meta';
 import { meta as kineticSculptureMeta } from '../examples/kinetic-sculpture/meta';
 import { meta as marbleMachineMeta } from '../examples/marble-machine/meta';
+import { meta as mechanicalGardenMeta } from '../examples/mechanical-garden/meta';
 
 const rawMetadata = {
   gradient: gradientMeta,
@@ -80,6 +81,7 @@ const rawMetadata = {
   'modular-city': modularCityMeta,
   'kinetic-sculpture': kineticSculptureMeta,
   'marble-machine': marbleMachineMeta,
+  'mechanical-garden': mechanicalGardenMeta,
 } satisfies Record<ExampleSlug, ExampleMetaDefinition>;
 
 function withThumbnails(meta: ExampleMetaDefinition): ExampleMeta {
@@ -129,6 +131,7 @@ export const exampleMetadataBySlug = {
   'modular-city': withThumbnails(rawMetadata['modular-city']),
   'kinetic-sculpture': withThumbnails(rawMetadata['kinetic-sculpture']),
   'marble-machine': withThumbnails(rawMetadata['marble-machine']),
+  'mechanical-garden': withThumbnails(rawMetadata['mechanical-garden']),
 } satisfies Record<ExampleSlug, ExampleMeta>;
 
 export const examplesMetadata = exampleSlugs.map((slug) => exampleMetadataBySlug[slug]);

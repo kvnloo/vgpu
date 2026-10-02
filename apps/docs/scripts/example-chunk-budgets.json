@@ -48,7 +48,8 @@
     "spring-choreography": 116092,
     "kinetic-sculpture": 98611,
     "modular-city": 108272,
-    "marble-machine": 133147
+    "marble-machine": 133147,
+    "mechanical-garden": 139788
   },
   "exampleGrowth": {
     "percent": 2,
@@ -81,5 +82,6 @@
   "$comment:liquid-layout-shared-chunks": "Adding Liquid Layout changes Turbopack chunk factoring: Spiral Galaxy's raw bytes stay at 272348 B, but its lil-gui code moves into the lil-gui/vgpu chunk that Glass Sculpture already loads, now shared by all three lil-gui routes. A same-machine control of the same tree with this example removed measures Spiral Galaxy at 86777 B gzip, versus 87311 B with it, on the same Node 22.21.1 and lockfile. Increase only Spiral Galaxy's baseline by the measured 534 B delta (86662 to 87196); its source and all growth rules remain unchanged. Atmosphere measures the same 111816 B in both local builds, so this example does not move it (canary CI run 36044722520 measures it at 111628 B).",
   "$comment:spring-choreography": "Measured at 116092 B gzip from a production build of this branch (canary cdf24a18 plus Liquid Layout and this example) on Node 24.13.0 / Next 16.3.3. The route loads no React Motion: vanilla Motion's core (animate, spring, stagger, frame) is a 24697 B chunk shared with Liquid Layout, and springValue with the vgpu compute runtime adds 3471 B. The example code and six WGSL modules are 21461 B; the rest is the two chunks every route loads (49880 B, including the vgpu runtime) and the 16583 B lil-gui/vgpu chunk shared with Glass Sculpture, Spiral Galaxy and Liquid Layout.",
   "$comment:spring-choreography-shared-chunks": "Adding Spring Choreography does not move any non-Motion route: Glass Sculpture matches canary CI run 36044722520 exactly (73289 B), Spiral Galaxy still measures 87311 B, and Atmosphere still reads the same 111816 B here (111628 B in that CI run).",
-  "$comment:scene-gallery": "Measured together from the final three-example production build on Node 22.21.1 / Next 16.3.3: Kinetic Sculpture 98611 B, Modular City 108272 B, Marble Machine 133147 B gzip. These include the shared runtime chunks; Marble Machine also includes the docs-only cannon-es physics dependency. The checker passed isolation and existing route limits before these three measured entries were added. All 35 existing example baselines, the shared-host budget, growth allowances and historical provenance are unchanged."
+  "$comment:scene-gallery": "Measured together from the final three-example production build on Node 22.21.1 / Next 16.3.3: Kinetic Sculpture 98611 B, Modular City 108272 B, Marble Machine 133147 B gzip. These include the shared runtime chunks; Marble Machine also includes the docs-only cannon-es physics dependency. The checker passed isolation and existing route limits before these three measured entries were added. All 35 existing example baselines, the shared-host budget, growth allowances and historical provenance are unchanged.",
+  "$comment:mechanical-garden": "Measured at 139788 B gzip from the final production build on Node 22.21.1 / Next 16.3.3. The route-owned chunk is 50319 B, including the procedural scene, seven WGSL modules and selected math utilities; the remaining 89469 B are shared runtime chunks, including vgpu/scene and lil-gui. All 38 existing routes pass their unchanged budgets; the shared-host budget, growth allowances and isolation checks are unchanged. math is a private docs-app dependency, not a vgpu runtime dependency."
 }

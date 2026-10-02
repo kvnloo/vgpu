@@ -37,6 +37,7 @@ export const exampleSlugs = [
   'modular-city',
   'kinetic-sculpture',
   'marble-machine',
+  'mechanical-garden',
 ] as const;
 
 export type ExampleSlug = (typeof exampleSlugs)[number];
