@@ -259,9 +259,9 @@ export interface Draw {
   group(n: number, bindGroup: GPUBindGroup): this;
   layout(n: number, opts?: DrawLayoutOptions): GPUBindGroupLayout;
   draw(target?: Target | DrawCallOptions): void;
-  /** @throws VGPU-SURFACE-NOT-IN-FRAME when passed a Surface outside frame(gpu). */
+  /** Prepares a pipeline for a target; a live Surface is accepted without acquiring its current texture. */
   compile(target?: CompileTarget): Promise<this>;
-  /** @throws VGPU-SURFACE-NOT-IN-FRAME when passed a Surface outside frame(gpu). */
+  /** Synchronously prepares a pipeline; a live Surface is accepted outside a frame. */
   compileSync(target?: CompileTarget): this;
 }
 
@@ -449,7 +449,7 @@ export class InternalDraw implements Draw {
   encode(pass: GPURenderPassEncoder, target: Target | TargetSignature, opts: DrawCallOptions = {}, claimValidation?: (result: ClaimedGroupValidationResult) => void, capture?: UniformCapture): void {
     assertDeviceUsable(drawState(this).device, `${this.label}.encode`);
     drawState(this).setCore.assertUsable();
-    const pipeline = this.pipelineFor(target, true);
+    const pipeline = this.pipelineFor(target);
     if (!pipeline) return;
     pass.setPipeline(pipeline);
     const state = drawState(this);
@@ -495,9 +495,9 @@ export class InternalDraw implements Draw {
     return this;
   }
 
-  pipelineFor(target: Target | TargetSignature, allowSurface = false): GPURenderPipeline | undefined {
+  pipelineFor(target: Target | TargetSignature): GPURenderPipeline | undefined {
     assertDeviceUsable(drawState(this).device, `${this.label}.pipelineFor`);
-    const { key, signature, signatureKey } = this.#compileKey(target, `${this.label}.pipelineFor`, allowSurface);
+    const { key, signature, signatureKey } = this.#compileKey(target, `${this.label}.pipelineFor`);
     const pipeline = drawState(this).pipelineStore.getSync(key, () => this.#createPipeline(signature), { where: `${this.label}.pipelineFor`, signature: signatureKey, dependencies: [drawState(this).shaderModule, drawState(this).pipelineLayout] });
     if (pipeline) drawState(this).resolvedPipelineKeys.add(key);
     return pipeline;
@@ -514,17 +514,16 @@ export class InternalDraw implements Draw {
     });
   }
 
-  #compileKey(target: CompileTarget | undefined, where: string, allowSurface = false): { readonly signature: TargetSignature; readonly signatureKey: string; readonly key: string } {
-    const signature = this.#signatureForKeyTarget(target, where, allowSurface);
+  #compileKey(target: CompileTarget | undefined, where: string): { readonly signature: TargetSignature; readonly signatureKey: string; readonly key: string } {
+    const signature = this.#signatureForKeyTarget(target, where);
     const signatureKey = signatureKeyOf(signature);
     return { signature, signatureKey, key: this.#pipelineKey(signature) };
   }
 
-  #signatureForKeyTarget(target: CompileTarget | undefined, where: string, allowSurface = false): TargetSignature {
+  #signatureForKeyTarget(target: CompileTarget | undefined, where: string): TargetSignature {
     const state = drawState(this);
     const resolvedTarget = target ?? state.defaultTarget;
     if (!resolvedTarget) throw targetRequiredError(where);
-    if (!allowSurface) assertSurfaceTargetInFrame(resolvedTarget, where);
     const signature = normalizeSignature(resolvedTarget);
     validateTargetSignature(signature, where);
     if (state.colorStates && state.colorStates.length !== signature.colors.length) {
