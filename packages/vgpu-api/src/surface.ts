@@ -195,10 +195,17 @@ export class CanvasSurface implements Surface {
   }
 
   applyAutoResize(): void {
-    if (this.#isDisposed || !this.autoResize || !this.layoutBacked) return;
-    const nextDpr = effectiveDpr(this.options.dpr);
-    const nextSize = layoutCanvasSize(this.canvas, nextDpr);
-    this.#applyResize(nextSize, nextDpr, true);
+    if (this.#isDisposed) return;
+    if (this.autoResize && this.layoutBacked) {
+      const nextDpr = effectiveDpr(this.options.dpr);
+      const nextSize = layoutCanvasSize(this.canvas, nextDpr);
+      this.#applyResize(nextSize, nextDpr, true);
+      return;
+    }
+    const currentCanvasSize = sanitizeSize(canvasSize(this.canvas));
+    if (!sameSize(this.#generationSize, currentCanvasSize)) {
+      this.#applyResize(currentCanvasSize, this.#currentDpr, false);
+    }
   }
 
   onResize(cb: (event: SurfaceResizeEvent) => void): () => void {
@@ -254,6 +261,8 @@ export class CanvasSurface implements Surface {
     const nextSize = Object.freeze([...size]) as readonly [number, number];
     const next = generationChanged ? this.#allocateAttachments(nextSize) : this.#attachments;
     const previous = this.#attachments;
+    const notifyPublic = notify && (canvasChanged || (generationChanged && previous.all.length > 0));
+    const wasNotifying = this.#notifying;
     this.#notifying = true;
     resizeCallbackDepth += 1;
     try {
@@ -263,7 +272,7 @@ export class CanvasSurface implements Surface {
       this.#attachments = next;
       const errors: unknown[] = [];
       try { this.#emitTexturesRecreated(); } catch (error) { errors.push(error); }
-      if (notify) {
+      if (notifyPublic) {
         try { this.#notify(); } catch (error) { errors.push(error); }
       }
       if (generationChanged) {
@@ -272,7 +281,7 @@ export class CanvasSurface implements Surface {
       if (errors.length) throw errors[0];
     } finally {
       resizeCallbackDepth -= 1;
-      this.#notifying = false;
+      this.#notifying = wasNotifying;
     }
   }
 
@@ -316,7 +325,7 @@ export class CanvasSurface implements Surface {
         format: this.format,
         usage: ["render_attachment"],
         sampleCount: 4,
-        label: this.options.label ? `${this.options.label}.color` : "surface.color.msaa",
+        label: this.options.label ? `${this.options.label}.color.msaa` : "surface.color.msaa",
       }) : undefined;
       const depth = this.#depthFormat ? create({
         kind: "2d",

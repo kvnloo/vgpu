@@ -193,6 +193,45 @@ test("an immediate onResize subscription cannot clear an outer texture-recreated
   }
 });
 
+test("descriptor reconciliation cannot clear an immediate onResize guard inside a frame", async () => {
+  const gpu = await init();
+  try {
+    const canvas = canvasFixture(8, 6);
+    const screen = surface(gpu, canvas.canvas, {
+      autoResize: false,
+      depth: true,
+      format: "rgba8unorm",
+      size: [8, 6],
+    });
+    const oldDepth = screen.depth!;
+    const drawable = draw(gpu, { shader: FULLSCREEN, label: "surface-drift-inside-resize-listener" });
+    let callbackCount = 0;
+    let reconciledDepth: Texture | undefined;
+
+    frame(gpu, (current) => {
+      canvas.canvas.width = 12;
+      canvas.canvas.height = 9;
+      screen.onResize(() => {
+        callbackCount += 1;
+        if (callbackCount > 1) return;
+        current.pass(screen, drawable);
+        reconciledDepth = screen.depth;
+        expect(reconciledDepth).not.toBe(oldDepth);
+        expect(reconciledDepth?.size).toEqual([12, 9]);
+        expect(() => screen.resize([14, 10])).toThrowError(expect.objectContaining({ code: "VGPU-SURFACE-RESIZE-REENTRANT" }));
+      });
+    });
+
+    expect(callbackCount).toBe(1);
+    expect(screen.size).toEqual([12, 9]);
+    expect(screen.depth).toBe(reconciledDepth);
+    expect(() => oldDepth.view).toThrowError(/destroyed/i);
+    expect(canvas.getCurrentTexture).toHaveBeenCalledTimes(1);
+  } finally {
+    gpu.dispose();
+  }
+});
+
 test.each([
   { name: "default", attachments: {} },
   { name: "depth+MSAA", attachments: { depth: true, msaa: true } },
@@ -287,6 +326,93 @@ test.each([
     } else {
       expect(screen.depth).toBeUndefined();
     }
+  } finally {
+    gpu.dispose();
+  }
+});
+
+test("frame start silently reconciles external depth drift before user encoding", async () => {
+  const gpu = await init();
+  try {
+    const canvas = canvasFixture(8, 6);
+    const screen = surface(gpu, canvas.canvas, {
+      autoResize: false,
+      depth: true,
+      format: "rgba8unorm",
+      size: [8, 6],
+    }) as CanvasSurface;
+    const output = target(gpu, { size: [12, 9], format: "rgba8unorm" });
+    const oldDepth = screen.depth!;
+    const inspect = draw(gpu, { shader: DEPTH_READ, depth: false, label: "inspect-pre-frame-depth", set: { sourceDepth: oldDepth } });
+    const recreated = vi.fn();
+    const resized = vi.fn();
+    screen.onTexturesRecreated(recreated);
+    screen.onResize(resized);
+    resized.mockClear();
+    canvas.canvas.width = 12;
+    canvas.canvas.height = 9;
+
+    frame(gpu, (current) => {
+      expect(recreated).toHaveBeenCalledTimes(1);
+      expect(resized).not.toHaveBeenCalled();
+      expect(canvas.getCurrentTexture).not.toHaveBeenCalled();
+      expect(screen.depth).not.toBe(oldDepth);
+      expect(screen.depth?.size).toEqual([12, 9]);
+      expect(() => oldDepth.view).toThrowError(/destroyed/i);
+      expect(() => current.pass(output, inspect)).toThrowError(expect.objectContaining({ code: "VGPU-R1-BINDING-DESTROYED" }));
+
+      inspect.set({ sourceDepth: screen.depth! });
+      expect(() => current.pass(output, inspect)).not.toThrow();
+    });
+
+    expect(resized).not.toHaveBeenCalled();
+    expect(canvas.getCurrentTexture).not.toHaveBeenCalled();
+  } finally {
+    gpu.dispose();
+  }
+});
+
+test.each([
+  { name: "default", depth: false, expectedStaleEvents: [] },
+  { name: "owned depth", depth: true, expectedStaleEvents: [[12, 9]] },
+] as const)("explicit resize preserves $name notification rules after direct canvas drift", async ({ depth, expectedStaleEvents }) => {
+  const gpu = await init();
+  try {
+    const canvas = canvasFixture(8, 6);
+    const screen = surface(gpu, canvas.canvas, {
+      autoResize: false,
+      depth,
+      format: "rgba8unorm",
+      size: [8, 6],
+    }) as CanvasSurface;
+    const oldDepth = screen.depth;
+    const publicResizes: Array<readonly [number, number]> = [];
+    const recreated = vi.fn();
+    screen.onTexturesRecreated(recreated);
+    screen.onResize(({ width, height }) => publicResizes.push([width, height]));
+    publicResizes.length = 0;
+    canvas.canvas.width = 12;
+    canvas.canvas.height = 9;
+
+    screen.resize([12, 9]);
+
+    expect(publicResizes).toEqual(expectedStaleEvents);
+    expect(recreated).toHaveBeenCalledTimes(1);
+    expect(canvas.getCurrentTexture).not.toHaveBeenCalled();
+    if (oldDepth) {
+      expect(screen.depth).not.toBe(oldDepth);
+      expect(screen.depth?.size).toEqual([12, 9]);
+      expect(() => oldDepth.view).toThrowError(/destroyed/i);
+    } else {
+      expect(screen.depth).toBeUndefined();
+    }
+
+    publicResizes.length = 0;
+    recreated.mockClear();
+    screen.resize([14, 10]);
+    expect(publicResizes).toEqual([[14, 10]]);
+    expect(recreated).toHaveBeenCalledTimes(1);
+    expect(screen.size).toEqual([14, 10]);
   } finally {
     gpu.dispose();
   }

@@ -131,6 +131,55 @@ describe.skipIf(process.env.VGPU_DOCKER_TEST !== "1")("Surface depth/MSAA native
     }
   });
 
+  test("pre-frame external drift replaces depth before encoding and accepts a live rebind", async () => {
+    const gpu = await init();
+    try {
+      const errors: unknown[] = [];
+      gpu.onError((error) => errors.push(error));
+      const canvas = gpuCanvasLike(12, 8);
+      const screen = surface(gpu, canvas, { autoResize: false, depth: true, format: "rgba8unorm" });
+      const output = target(gpu, { size: [16, 10], format: "rgba8unorm" });
+      const oldDepth = screen.depth!;
+      const inspectDepth = draw(gpu, {
+        shader: READ_DEPTH_UNFILTERABLE,
+        depth: false,
+        label: "inspect-reconciled-depth",
+        set: { sceneDepth: oldDepth },
+      });
+      const writeDepth = draw(gpu, { shader: FULLSCREEN_AT_DEPTH(0.25, [1, 0, 0]), label: "write-reconciled-depth" });
+      const publicResizes: Array<readonly [number, number]> = [];
+      screen.onResize(({ width, height }) => publicResizes.push([width, height]));
+      publicResizes.length = 0;
+      canvas.width = 16;
+      canvas.height = 10;
+
+      const submitted = frame(gpu, (current) => {
+        expect(screen.depth).not.toBe(oldDepth);
+        expect(screen.depth?.size).toEqual([16, 10]);
+        expect(() => oldDepth.view).toThrowError(/destroyed/i);
+        expect(() => current.pass(output, inspectDepth)).toThrowError(
+          expect.objectContaining({ code: "VGPU-R1-BINDING-DESTROYED" }),
+        );
+
+        current.pass(screen, writeDepth);
+        inspectDepth.set({ sceneDepth: screen.depth! });
+        current.pass(output, inspectDepth);
+      });
+
+      await submitted.done;
+      await gpu.settled();
+      expect(errors).toEqual([]);
+      expect(publicResizes).toEqual([]);
+      const sampled = pixelAt(await output.color.read({ mipLevel: 0, region: "all" }), 16, 8, 5);
+      expect(sampled[0]).toBeGreaterThan(55);
+      expect(sampled[0]).toBeLessThan(75);
+      expect(sampled[1]).toBeGreaterThan(180);
+      expect(sampled[1]).toBeLessThan(200);
+    } finally {
+      gpu.dispose();
+    }
+  });
+
   test("scene instance geometry renders directly and single-sample depth is read-only sampleable in compatibility mode", async () => {
     const gpu = await init();
     try {
